@@ -1,0 +1,24 @@
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tools/call",
+  "params": {
+    "name": "gemini_prompt_structured",
+    "arguments": {
+      "prompt": "Pick a hex color and give it a friendly two-word name.",
+      "schema": {
+        "type": "object",
+        "required": ["name", "hex"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "hex": {
+            "type": "string",
+            "pattern": "^#[0-9a-fA-F]{6}$"
+          }
+        },
+        "additionalProperties": false
+      },
+      "model": "gemini-2.5-pro"
+    }
+  }
+}

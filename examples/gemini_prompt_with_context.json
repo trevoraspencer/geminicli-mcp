@@ -1,0 +1,13 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "gemini_prompt_with_context",
+    "arguments": {
+      "prompt": "Summarise the function in one sentence and flag any obvious bugs.",
+      "context": "export function clamp(value, lo, hi) {\n  if (value < lo) return lo;\n  if (value > hi) return lo;\n  return value;\n}",
+      "model": "gemini-2.5-pro"
+    }
+  }
+}

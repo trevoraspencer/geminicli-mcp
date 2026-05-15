@@ -1,0 +1,67 @@
+{
+  "name": "geminicli-mcp",
+  "version": "1.0.0",
+  "description": "MCP server exposing the headless Gemini CLI as stateless stdio tools (gemini_prompt, gemini_prompt_with_context, gemini_prompt_structured).",
+  "author": "Trevor Spencer <trevoraspencer@gmail.com>",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "geminicli-mcp": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/trevoraspencer/geminicli-mcp.git"
+  },
+  "homepage": "https://github.com/trevoraspencer/geminicli-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/trevoraspencer/geminicli-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "gemini",
+    "gemini-cli",
+    "google",
+    "stdio",
+    "ai",
+    "model-context-protocol",
+    "llm",
+    "structured-output"
+  ],
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc --watch",
+    "lint": "eslint src/",
+    "test": "node --test test/*.test.mjs",
+    "test:live": "GEMINICLI_MCP_LIVE=1 node --test test/*.test.mjs",
+    "prepublishOnly": "npm run build && npm test",
+    "prepare": "husky"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@typescript-eslint/eslint-plugin": "^8.59.3",
+    "@typescript-eslint/parser": "^8.59.3",
+    "eslint": "^10.3.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^15.5.2",
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "lint-staged": {
+    "src/**/*.ts": "eslint --fix"
+  }
+}
