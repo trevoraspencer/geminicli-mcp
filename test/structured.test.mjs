@@ -322,6 +322,35 @@ test("extractJson returns undefined when there's no JSON", () => {
   assert.equal(extractJson("nope, no json here"), undefined);
 });
 
+test("extractJson: non-json fence tags fall through to the balanced scan (review finding 7)", () => {
+  // ```js used to capture 'js\n{...}' — the language tag landed inside the
+  // payload and broke JSON.parse even though the balanced scan would have
+  // extracted the object cleanly.
+  const raw = 'Sure:\n```js\n{"a":1}\n```';
+  assert.equal(extractJson(raw), '{"a":1}');
+});
+
+test("extractJson: untagged and uppercase-tagged fences still extract (review finding 7)", () => {
+  assert.equal(extractJson('```\n{"a":1}\n```'), '{"a":1}');
+  assert.equal(extractJson('```JSON\n{"a":1}\n```'), '{"a":1}');
+  // One-line fence without a newline after the tag keeps working too.
+  assert.equal(extractJson('```json {"a":1} ```'), '{"a":1}');
+});
+
+test("parseAndValidateStructured: js-fenced JSON parses via the balanced-scan fallback (review finding 7)", () => {
+  const schema = {
+    type: "object",
+    properties: { x: { type: "number" } },
+    required: ["x"],
+  };
+  const out = parseAndValidateStructured(
+    fakeOkResult('```js\n{"x": 5}\n```'),
+    schema
+  );
+  assert.equal(out.exitCode, 0);
+  assert.deepEqual(out.value, { x: 5 });
+});
+
 // --- parseAndValidateStructured -------------------------------------------
 
 test("parseAndValidateStructured: success path returns value + canonical JSON", () => {

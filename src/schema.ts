@@ -501,10 +501,18 @@ export function formatErrors(errors: ValidationError[]): string {
  * Useful when a model wraps its JSON in prose or ```json fences.
  */
 export function extractJson(raw: string): string | undefined {
-  // Strip ```json ... ``` fences if present.
-  const fenceMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+  // Strip ```json ... ``` fences if present. The info string is captured
+  // explicitly: with the old `(?:json)?` a non-JSON tag like ```js matched
+  // empty and the tag landed inside the extracted payload, breaking
+  // JSON.parse. Unrecognized tags now fall through to the balanced scan.
+  const fenceMatch = raw.match(
+    /```([A-Za-z0-9+#._-]*)[ \t]*\r?\n?([\s\S]*?)```/
+  );
   if (fenceMatch) {
-    return (fenceMatch[1] ?? "").trim();
+    const tag = (fenceMatch[1] ?? "").toLowerCase();
+    if (tag === "" || tag === "json") {
+      return (fenceMatch[2] ?? "").trim();
+    }
   }
   const firstObj = raw.indexOf("{");
   const firstArr = raw.indexOf("[");
