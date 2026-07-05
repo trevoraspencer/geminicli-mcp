@@ -77,6 +77,27 @@ test("validate: array items + minItems", () => {
   assert.match(wrongItem[0].path, /\$\[1\]/);
 });
 
+test("validate: null array items validate against nullable item schemas (review finding 2)", () => {
+  // Regression: `item ?? undefined` rewrote null items to undefined, so
+  // {"items": {"type": ["string", "null"]}} rejected [null].
+  const schema = { type: "array", items: { type: ["string", "null"] } };
+  assert.deepEqual(validate([null, "a", null], schema), []);
+  // enum/const item schemas that allow null must accept null items too.
+  assert.deepEqual(
+    validate([null], { type: "array", items: { enum: [null, "x"] } }),
+    []
+  );
+  assert.deepEqual(
+    validate([null], { type: "array", items: { const: null } }),
+    []
+  );
+  // Genuine item-type violations are still reported at the right path.
+  const errs = validate([null, 7], schema);
+  assert.equal(errs.length, 1);
+  assert.match(errs[0].path, /\$\[1\]/);
+  assert.match(errs[0].message, /expected type string\|null/);
+});
+
 test("validate: enum", () => {
   const schema = { enum: ["red", "green", "blue"] };
   assert.equal(validate("red", schema).length, 0);
@@ -135,6 +156,44 @@ test("validate: non-string value skips pattern check entirely", () => {
   // only the type mismatch is reported (no ReDoS error).
   const errs = validate(42, schema);
   assert.equal(errs.length, 0); // no type constraint => no error
+});
+
+test("validate: optional-suffix pattern (X+)? is accepted as safe (review finding 3)", () => {
+  // Regression: `?` after a quantified group runs the group at most once and
+  // cannot backtrack catastrophically, but it used to be flagged as ReDoS.
+  const decimal = { type: "string", pattern: "^\\d+(\\.\\d+)?$" };
+  assert.equal(validate("1.25", decimal).length, 0);
+  assert.equal(validate("7", decimal).length, 0);
+  const errs = validate("not-a-number", decimal);
+  assert.equal(errs.length, 1);
+  assert.match(errs[0].message, /does not match pattern/);
+});
+
+test("validate: semver-ish optional suffix pattern is accepted as safe (review finding 3)", () => {
+  const schema = { type: "string", pattern: "^\\d+\\.\\d+\\.\\d+(-[a-z]+)?$" };
+  assert.equal(validate("1.2.3-beta", schema).length, 0);
+  assert.equal(validate("1.2.3", schema).length, 0);
+  assert.equal(validate("1.2", schema).length, 1);
+});
+
+test("validate: brace bounds after a quantified group are inspected (review finding 3)", () => {
+  // Max <= 1: group runs at most once — safe.
+  assert.equal(validate("aa", { type: "string", pattern: "^(a+){0,1}$" }).length, 0);
+  // Unbounded {2,}: repetition allowed — still rejected.
+  const unbounded = validate("hello", { type: "string", pattern: "(a+){2,}" });
+  assert.equal(unbounded.length, 1);
+  assert.match(unbounded[0].message, /ReDoS/i);
+  // Bounded max > 1: still rejected (conservative).
+  const bounded = validate("hello", { type: "string", pattern: "(a+){2,3}" });
+  assert.equal(bounded.length, 1);
+  assert.match(bounded[0].message, /ReDoS/i);
+});
+
+test("validate: optional group nested inside a repeated group is still rejected (review finding 3)", () => {
+  // ((a+)?)+ is (a*)*-shaped — the outer + repeats — must stay flagged.
+  const errs = validate("hello", { type: "string", pattern: "((a+)?)+" });
+  assert.equal(errs.length, 1);
+  assert.match(errs[0].message, /ReDoS/i);
 });
 
 test("validate: very long pattern is rejected", () => {
@@ -261,6 +320,35 @@ test("extractJson handles a bare array", () => {
 
 test("extractJson returns undefined when there's no JSON", () => {
   assert.equal(extractJson("nope, no json here"), undefined);
+});
+
+test("extractJson: non-json fence tags fall through to the balanced scan (review finding 7)", () => {
+  // ```js used to capture 'js\n{...}' — the language tag landed inside the
+  // payload and broke JSON.parse even though the balanced scan would have
+  // extracted the object cleanly.
+  const raw = 'Sure:\n```js\n{"a":1}\n```';
+  assert.equal(extractJson(raw), '{"a":1}');
+});
+
+test("extractJson: untagged and uppercase-tagged fences still extract (review finding 7)", () => {
+  assert.equal(extractJson('```\n{"a":1}\n```'), '{"a":1}');
+  assert.equal(extractJson('```JSON\n{"a":1}\n```'), '{"a":1}');
+  // One-line fence without a newline after the tag keeps working too.
+  assert.equal(extractJson('```json {"a":1} ```'), '{"a":1}');
+});
+
+test("parseAndValidateStructured: js-fenced JSON parses via the balanced-scan fallback (review finding 7)", () => {
+  const schema = {
+    type: "object",
+    properties: { x: { type: "number" } },
+    required: ["x"],
+  };
+  const out = parseAndValidateStructured(
+    fakeOkResult('```js\n{"x": 5}\n```'),
+    schema
+  );
+  assert.equal(out.exitCode, 0);
+  assert.deepEqual(out.value, { x: 5 });
 });
 
 // --- parseAndValidateStructured -------------------------------------------

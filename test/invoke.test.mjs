@@ -9,6 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   buildArgv,
+  classifyExitCode,
   composePrompt,
   childEnv,
   debugEnabled,
@@ -378,6 +379,58 @@ test("chunked fake-bin output joins and parses to the expected result (VAL-REM-F
   }
 });
 
+test("multibyte UTF-8 split across pipe chunks decodes without U+FFFD corruption (review finding 4)", async () => {
+  // '{"response":"héllo"}' emitted as two delayed writes split mid-é
+  // (0xC3 | 0xA9). Per-chunk Buffer#toString("utf8") decoded this to
+  // 'h��llo'; the per-stream StringDecoder must not.
+  const json = '{"response":"héllo"}';
+  const hex = Buffer.from(json, "utf8").toString("hex");
+  const fake = makeFakeBin(
+    `node -e "const b = Buffer.from('${hex}', 'hex'); process.stdout.write(b.subarray(0, 15)); setTimeout(() => process.stdout.write(b.subarray(15)), 80)"`
+  );
+  try {
+    await withEnv({ GEMINI_CLI_BIN: fake }, async () => {
+      const r = await invokeGemini({ prompt: "hi" });
+      assert.equal(r.exitCode, 0);
+      assert.equal(r.text, "héllo");
+      assert.ok(
+        !r.raw.includes("�"),
+        `raw contains replacement chars: ${r.raw}`
+      );
+    });
+  } finally {
+    try { fs.unlinkSync(fake); } catch {}
+  }
+});
+
+test("output cap counts bytes, not UTF-16 code units, for multibyte output (review finding 4)", async () => {
+  // 32 emoji = 128 UTF-8 bytes but only 64 UTF-16 code units. With a 64-byte
+  // cap the child must be truncated after 16 emoji; the old code compared
+  // code units, letting all 128 bytes through untruncated (up to ~4x the
+  // configured cap for astral-plane content).
+  const emoji = "\u{1F600}";
+  const fake = makeFakeBin(`printf '${emoji.repeat(32)}'`);
+  try {
+    await withEnv(
+      { GEMINI_CLI_BIN: fake, GEMINICLI_MCP_MAX_OUTPUT_BYTES: "64" },
+      async () => {
+        const r = await invokeGemini({ prompt: "hi" });
+        assert.equal(r.truncated, true, "cap must trigger on byte count");
+        const noticeIdx = r.raw.indexOf("\n[geminicli-mcp:");
+        const content = noticeIdx === -1 ? r.raw : r.raw.slice(0, noticeIdx);
+        assert.ok(
+          Buffer.byteLength(content, "utf8") <= 64,
+          `accumulated ${Buffer.byteLength(content, "utf8")} bytes, cap is 64`
+        );
+        assert.equal(content, emoji.repeat(16), "exactly 16 emoji fit in 64 bytes");
+        assert.ok(!content.includes("�"), "no replacement chars at the cut");
+      }
+    );
+  } finally {
+    try { fs.unlinkSync(fake); } catch {}
+  }
+});
+
 test("tryParseJson parses whole-buffer JSON without line splitting (AUDIT-PERF-002 regression)", () => {
   // Single JSON object on one line — the fast whole-buffer path should handle it.
   const parsed = tryParseJson('{"response":"fast path"}');
@@ -507,6 +560,15 @@ test("context prompt routing: prompt starts with <context> followed by a newline
 
 // --- classifyExitCode(41) auth_required (AUDIT-TEST-005, VAL-REM-F14-002) ---
 
+test("classifyExitCode(127) maps to error, matching the README table and spawn path (review finding 6)", () => {
+  // A resolved wrapper script that itself exits 127 must classify the same
+  // way as the synthesized ENOENT result — not as 'unknown'.
+  assert.equal(classifyExitCode(127), "error");
+  // Codes outside the documented set still classify as unknown.
+  assert.equal(classifyExitCode(99), "unknown");
+  assert.equal(classifyExitCode(126), "unknown");
+});
+
 test("classifyExitCode(41) maps to auth_required (VAL-REM-F14-002)", async () => {
   const fake = makeFakeBin(`exit 41`);
   try {
@@ -554,6 +616,46 @@ test("fake-bin SIGTERM: child killed by SIGTERM via output cap returns exit code
     try { fs.unlinkSync(fake); } catch {}
   }
 });
+
+// --- SIGKILL escalation for SIGTERM-ignoring children (review finding 5) ---
+
+test(
+  "child that ignores SIGTERM is SIGKILL-escalated instead of hanging the call (review finding 5)",
+  {
+    skip:
+      process.platform === "win32"
+        ? "SIGTERM cannot be trapped on Windows"
+        : false,
+    // Before the escalation existed this call never resolved; a hard test
+    // timeout turns a regression into a clean failure instead of a hang.
+    timeout: 30_000,
+  },
+  async () => {
+    // The shell ignores SIGTERM and streams forever — the output cap fires
+    // killWith, SIGTERM is swallowed, and only the SIGKILL escalation
+    // (2s grace) can end the child.
+    const fake = makeFakeBin(`trap '' TERM; while :; do printf 'y\\n'; done`);
+    try {
+      await withEnv(
+        { GEMINI_CLI_BIN: fake, GEMINICLI_MCP_MAX_OUTPUT_BYTES: "64" },
+        async () => {
+          const start = Date.now();
+          const r = await invokeGemini({ prompt: "hi" });
+          const elapsed = Date.now() - start;
+          // SIGKILL = 9 -> POSIX exit code 128 + 9 = 137.
+          assert.equal(r.exitCode, 137, "child must die by SIGKILL");
+          assert.equal(r.truncated, true);
+          assert.ok(
+            elapsed < 15_000,
+            `call must resolve promptly after escalation: ${elapsed}ms`
+          );
+        }
+      );
+    } finally {
+      try { fs.unlinkSync(fake); } catch {}
+    }
+  }
+);
 
 // --- Invalid GEMINICLI_MCP_MAX_OUTPUT_BYTES falls back to default (AUDIT-TEST-011, VAL-REM-F14-005) ---
 

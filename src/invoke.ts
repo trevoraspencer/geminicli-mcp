@@ -5,6 +5,7 @@
  */
 import { spawn } from "node:child_process";
 import os from "node:os";
+import { StringDecoder } from "node:string_decoder";
 import { extractJson, formatErrors, validate, type JsonSchema } from "./schema.js";
 
 /**
@@ -73,6 +74,17 @@ function maxOutputBytes(): number {
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_MAX_OUTPUT_BYTES;
 }
 
+/**
+ * Grace period between the initial SIGTERM and the SIGKILL escalation once
+ * the server has decided to kill the child (output cap exceeded or caller
+ * abort). A child that traps or ignores SIGTERM would otherwise never emit
+ * `close`, leaving the MCP call pending forever while the child burns CPU.
+ * This is kill reliability, not server-side timeout enforcement: the timer
+ * is only armed after a kill decision, and it is unref'd so it can never
+ * hold the server process open.
+ */
+const SIGKILL_GRACE_MS = 2000;
+
 export interface GeminiStructuredInvocation extends GeminiInvocation {
   schema: JsonSchema;
 }
@@ -97,6 +109,10 @@ export function classifyExitCode(
       return "input_validation";
     case 53:
       return "turn_limit";
+    case 127:
+      // Binary not found — matches the README exit-code table and the
+      // synthesized ENOENT result from spawnErrorResult().
+      return "error";
     default:
       return "unknown";
   }
@@ -250,12 +266,20 @@ function runCli(
     // string concatenation (AUDIT-PERF-001).
     const stdoutChunks: string[] = [];
     const stderrChunks: string[] = [];
+    // One stateful decoder per stream: a multibyte UTF-8 sequence split
+    // across two pipe chunks must not decode to U+FFFD replacement chars,
+    // which per-chunk Buffer#toString("utf8") produced.
+    const stdoutDecoder = new StringDecoder("utf8");
+    const stderrDecoder = new StringDecoder("utf8");
+    // Byte counts (Buffer lengths) — the cap is documented as bytes, so it
+    // must not count UTF-16 code units of the decoded text.
     let stdoutLen = 0;
     let stderrLen = 0;
     let truncated = false;
     let aborted = false;
     let killed = false;
     let killFailed = false;
+    let killTimer: NodeJS.Timeout | undefined;
     const startTime = Date.now();
 
     const killWith = (reason: "truncated" | "aborted") => {
@@ -275,46 +299,63 @@ function runCli(
           });
         }
       }
+      // Escalate to SIGKILL if the child ignores SIGTERM — a runaway child
+      // is exactly the adversary the output cap exists for. The timer is
+      // unref'd and cleared on close, so a cooperative child sees no change.
+      killTimer = setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // Child is already gone (or unkillable); close/error handles it.
+        }
+      }, SIGKILL_GRACE_MS);
+      killTimer.unref();
     };
 
     const onAbort = () => killWith("aborted");
     if (signal) signal.addEventListener("abort", onAbort, { once: true });
 
-    child.stdout.on("data", (c) => {
-      const chunk = c.toString("utf8");
-      if (stdoutLen + chunk.length > cap) {
-        const slice = chunk.slice(0, Math.max(0, cap - stdoutLen));
-        if (slice.length > 0) {
-          stdoutChunks.push(slice);
-          stdoutLen += slice.length;
+    child.stdout.on("data", (c: Buffer) => {
+      if (stdoutLen + c.length > cap) {
+        const room = Math.max(0, cap - stdoutLen);
+        if (room > 0) {
+          // Decode only the bytes that fit; the decoder withholds any
+          // trailing partial character instead of emitting U+FFFD.
+          const slice = stdoutDecoder.write(c.subarray(0, room));
+          if (slice.length > 0) stdoutChunks.push(slice);
+          stdoutLen += room;
         }
         killWith("truncated");
       } else {
-        stdoutChunks.push(chunk);
-        stdoutLen += chunk.length;
+        const chunk = stdoutDecoder.write(c);
+        if (chunk.length > 0) stdoutChunks.push(chunk);
+        stdoutLen += c.length;
       }
     });
-    child.stderr.on("data", (c) => {
-      const chunk = c.toString("utf8");
-      if (stderrLen + chunk.length > cap) {
-        const slice = chunk.slice(0, Math.max(0, cap - stderrLen));
-        if (slice.length > 0) {
-          stderrChunks.push(slice);
-          stderrLen += slice.length;
+    child.stderr.on("data", (c: Buffer) => {
+      if (stderrLen + c.length > cap) {
+        const room = Math.max(0, cap - stderrLen);
+        if (room > 0) {
+          const slice = stderrDecoder.write(c.subarray(0, room));
+          if (slice.length > 0) stderrChunks.push(slice);
+          stderrLen += room;
         }
         killWith("truncated");
       } else {
-        stderrChunks.push(chunk);
-        stderrLen += chunk.length;
+        const chunk = stderrDecoder.write(c);
+        if (chunk.length > 0) stderrChunks.push(chunk);
+        stderrLen += c.length;
       }
     });
 
     child.on("error", (err) => {
       if (signal) signal.removeEventListener("abort", onAbort);
+      if (killTimer) clearTimeout(killTimer);
       reject(err);
     });
     child.on("close", (code, sigName) => {
       if (signal) signal.removeEventListener("abort", onAbort);
+      if (killTimer) clearTimeout(killTimer);
       let exitCode: number;
       if (typeof code === "number") {
         exitCode = code;
@@ -325,6 +366,14 @@ function runCli(
       } else {
         exitCode = 1;
       }
+      // Flush any bytes still buffered in the decoders. A stream that ended
+      // mid-character (truncated at the byte cap or killed mid-write) yields
+      // the standard U+FFFD replacement character here, same as
+      // readable.setEncoding would.
+      const stdoutTail = stdoutDecoder.end();
+      if (stdoutTail.length > 0) stdoutChunks.push(stdoutTail);
+      const stderrTail = stderrDecoder.end();
+      if (stderrTail.length > 0) stderrChunks.push(stderrTail);
       let stdout = stdoutChunks.join("");
       let stderr = stderrChunks.join("");
       if (truncated) {
