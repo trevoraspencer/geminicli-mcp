@@ -77,6 +77,27 @@ test("validate: array items + minItems", () => {
   assert.match(wrongItem[0].path, /\$\[1\]/);
 });
 
+test("validate: null array items validate against nullable item schemas (review finding 2)", () => {
+  // Regression: `item ?? undefined` rewrote null items to undefined, so
+  // {"items": {"type": ["string", "null"]}} rejected [null].
+  const schema = { type: "array", items: { type: ["string", "null"] } };
+  assert.deepEqual(validate([null, "a", null], schema), []);
+  // enum/const item schemas that allow null must accept null items too.
+  assert.deepEqual(
+    validate([null], { type: "array", items: { enum: [null, "x"] } }),
+    []
+  );
+  assert.deepEqual(
+    validate([null], { type: "array", items: { const: null } }),
+    []
+  );
+  // Genuine item-type violations are still reported at the right path.
+  const errs = validate([null, 7], schema);
+  assert.equal(errs.length, 1);
+  assert.match(errs[0].path, /\$\[1\]/);
+  assert.match(errs[0].message, /expected type string\|null/);
+});
+
 test("validate: enum", () => {
   const schema = { enum: ["red", "green", "blue"] };
   assert.equal(validate("red", schema).length, 0);

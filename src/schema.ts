@@ -393,8 +393,9 @@ export function validate(
     if (schema.items && typeof schema.items === "object") {
       const itemSchema = schema.items;
       for (let i = 0; i < value.length; i++) {
-        const item = value[i];
-        errors.push(...validate(item ?? undefined, itemSchema, `${path}[${i}]`));
+        // Pass items through untouched — rewriting null to undefined here
+        // broke schemas like {"items": {"type": ["string", "null"]}}.
+        errors.push(...validate(value[i], itemSchema, `${path}[${i}]`));
       }
     }
   }
