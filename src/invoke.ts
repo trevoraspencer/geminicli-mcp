@@ -74,6 +74,17 @@ function maxOutputBytes(): number {
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_MAX_OUTPUT_BYTES;
 }
 
+/**
+ * Grace period between the initial SIGTERM and the SIGKILL escalation once
+ * the server has decided to kill the child (output cap exceeded or caller
+ * abort). A child that traps or ignores SIGTERM would otherwise never emit
+ * `close`, leaving the MCP call pending forever while the child burns CPU.
+ * This is kill reliability, not server-side timeout enforcement: the timer
+ * is only armed after a kill decision, and it is unref'd so it can never
+ * hold the server process open.
+ */
+const SIGKILL_GRACE_MS = 2000;
+
 export interface GeminiStructuredInvocation extends GeminiInvocation {
   schema: JsonSchema;
 }
@@ -264,6 +275,7 @@ function runCli(
     let aborted = false;
     let killed = false;
     let killFailed = false;
+    let killTimer: NodeJS.Timeout | undefined;
     const startTime = Date.now();
 
     const killWith = (reason: "truncated" | "aborted") => {
@@ -283,6 +295,17 @@ function runCli(
           });
         }
       }
+      // Escalate to SIGKILL if the child ignores SIGTERM — a runaway child
+      // is exactly the adversary the output cap exists for. The timer is
+      // unref'd and cleared on close, so a cooperative child sees no change.
+      killTimer = setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // Child is already gone (or unkillable); close/error handles it.
+        }
+      }, SIGKILL_GRACE_MS);
+      killTimer.unref();
     };
 
     const onAbort = () => killWith("aborted");
@@ -323,10 +346,12 @@ function runCli(
 
     child.on("error", (err) => {
       if (signal) signal.removeEventListener("abort", onAbort);
+      if (killTimer) clearTimeout(killTimer);
       reject(err);
     });
     child.on("close", (code, sigName) => {
       if (signal) signal.removeEventListener("abort", onAbort);
+      if (killTimer) clearTimeout(killTimer);
       let exitCode: number;
       if (typeof code === "number") {
         exitCode = code;

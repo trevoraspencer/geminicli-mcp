@@ -607,6 +607,46 @@ test("fake-bin SIGTERM: child killed by SIGTERM via output cap returns exit code
   }
 });
 
+// --- SIGKILL escalation for SIGTERM-ignoring children (review finding 5) ---
+
+test(
+  "child that ignores SIGTERM is SIGKILL-escalated instead of hanging the call (review finding 5)",
+  {
+    skip:
+      process.platform === "win32"
+        ? "SIGTERM cannot be trapped on Windows"
+        : false,
+    // Before the escalation existed this call never resolved; a hard test
+    // timeout turns a regression into a clean failure instead of a hang.
+    timeout: 30_000,
+  },
+  async () => {
+    // The shell ignores SIGTERM and streams forever — the output cap fires
+    // killWith, SIGTERM is swallowed, and only the SIGKILL escalation
+    // (2s grace) can end the child.
+    const fake = makeFakeBin(`trap '' TERM; while :; do printf 'y\\n'; done`);
+    try {
+      await withEnv(
+        { GEMINI_CLI_BIN: fake, GEMINICLI_MCP_MAX_OUTPUT_BYTES: "64" },
+        async () => {
+          const start = Date.now();
+          const r = await invokeGemini({ prompt: "hi" });
+          const elapsed = Date.now() - start;
+          // SIGKILL = 9 -> POSIX exit code 128 + 9 = 137.
+          assert.equal(r.exitCode, 137, "child must die by SIGKILL");
+          assert.equal(r.truncated, true);
+          assert.ok(
+            elapsed < 15_000,
+            `call must resolve promptly after escalation: ${elapsed}ms`
+          );
+        }
+      );
+    } finally {
+      try { fs.unlinkSync(fake); } catch {}
+    }
+  }
+);
+
 // --- Invalid GEMINICLI_MCP_MAX_OUTPUT_BYTES falls back to default (AUDIT-TEST-011, VAL-REM-F14-005) ---
 
 test("invalid GEMINICLI_MCP_MAX_OUTPUT_BYTES 'abc' falls back to default cap (VAL-REM-F14-005)", async () => {
