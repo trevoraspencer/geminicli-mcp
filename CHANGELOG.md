@@ -43,6 +43,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `extractJson` no longer emits a spurious "does not match pattern" error
   alongside an "invalid regex in schema.pattern" error.
 
+### Fixed
+
+- Schema validator no longer rejects `null` array items against nullable
+  item schemas (`{"items": {"type": ["string", "null"]}}` accepts `[null]`).
+- ReDoS pattern heuristic no longer rejects the common optional-suffix idiom
+  `(X+)?` (e.g. `^\d+(\.\d+)?$`); only quantifiers that permit repetition
+  (`+`, `*`, `{n,}`, `{n,m}` with max > 1) after a quantified group are
+  flagged. Pathological patterns like `(a+)+` are still rejected.
+- Child stdout/stderr are decoded with a per-stream `StringDecoder`, so
+  multibyte UTF-8 sequences split across pipe chunks no longer corrupt the
+  output with U+FFFD replacement characters.
+- `GEMINICLI_MCP_MAX_OUTPUT_BYTES` now counts bytes (as documented) instead
+  of UTF-16 code units, which admitted up to ~4x the configured cap for
+  astral-plane content.
+- A child that ignores SIGTERM is escalated to SIGKILL after a 2s grace
+  period instead of hanging the MCP call forever (output-cap and
+  cancellation kills only; no server-side timeout was added).
+- Child exit code 127 now classifies as `error`, matching the README
+  exit-code table and the synthesized binary-not-found result.
+- `extractJson` no longer swallows non-`json` fence language tags: a
+  `js`-fenced response falls through to the balanced-brace scan instead of
+  failing `JSON.parse` with the tag inside the payload.
+- README: documented that Windows requires `GEMINI_CLI_BIN` to point at the
+  gemini CLI's JavaScript entry (npm `.cmd`/`.ps1` shims cannot be spawned
+  without a shell).
+
 ### Removed
 
 - `skill.sh` — orphan Hermes-style shell wrapper; not referenced anywhere

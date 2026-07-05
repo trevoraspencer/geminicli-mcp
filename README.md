@@ -130,7 +130,9 @@ or invokes a tool from the command line.
 ## Environment
 
 - `GEMINI_CLI_BIN` — override the `gemini` binary path (default: `gemini` on
-  `PATH`).
+  `PATH`). On Windows this must point at the CLI's JavaScript entry
+  (npm's `gemini.cmd`/`gemini.ps1` shims cannot be spawned without a shell);
+  see the Windows note under Troubleshooting.
 - `GEMINICLI_MCP_MAX_OUTPUT_BYTES` — cap (per stream) on bytes accumulated
   from the gemini child's stdout/stderr before the server kills it (default:
   33554432 / 32 MiB). Guards against a runaway child OOM-ing the server.
@@ -210,6 +212,32 @@ or configure your MCP client's `env` block, e.g.:
   }
 }
 ```
+
+### Windows: exit 127 even though `gemini` works in your terminal
+
+On Windows, npm installs the `gemini` command as a `gemini.cmd` /
+`gemini.ps1` shim. The server spawns the child without a shell (by design —
+shell-spawning `.cmd` files is restricted since CVE-2024-27980), so the
+default `gemini` binary name cannot be executed and every call returns the
+exit-127 "binary not found" result. **On Windows you must point
+`GEMINI_CLI_BIN` at the CLI's JavaScript entry**; the server runs
+`.js`/`.cjs`/`.mjs` paths with its own Node runtime:
+
+```jsonc
+{
+  "mcpServers": {
+    "gemini": {
+      "command": "geminicli-mcp",
+      "env": {
+        "GEMINI_CLI_BIN": "C:\\Users\\you\\AppData\\Roaming\\npm\\node_modules\\@google\\gemini-cli\\bundle\\gemini.js"
+      }
+    }
+  }
+}
+```
+
+Find the right path with `npm root -g` — the entry point is
+`<npm root -g>\@google\gemini-cli\bundle\gemini.js`.
 
 ### "Auth not configured" / authentication errors
 
