@@ -109,6 +109,10 @@ export function classifyExitCode(
       return "input_validation";
     case 53:
       return "turn_limit";
+    case 127:
+      // Binary not found — matches the README exit-code table and the
+      // synthesized ENOENT result from spawnErrorResult().
+      return "error";
     default:
       return "unknown";
   }

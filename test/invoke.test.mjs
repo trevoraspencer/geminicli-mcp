@@ -9,6 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   buildArgv,
+  classifyExitCode,
   composePrompt,
   childEnv,
   debugEnabled,
@@ -558,6 +559,15 @@ test("context prompt routing: prompt starts with <context> followed by a newline
 });
 
 // --- classifyExitCode(41) auth_required (AUDIT-TEST-005, VAL-REM-F14-002) ---
+
+test("classifyExitCode(127) maps to error, matching the README table and spawn path (review finding 6)", () => {
+  // A resolved wrapper script that itself exits 127 must classify the same
+  // way as the synthesized ENOENT result — not as 'unknown'.
+  assert.equal(classifyExitCode(127), "error");
+  // Codes outside the documented set still classify as unknown.
+  assert.equal(classifyExitCode(99), "unknown");
+  assert.equal(classifyExitCode(126), "unknown");
+});
 
 test("classifyExitCode(41) maps to auth_required (VAL-REM-F14-002)", async () => {
   const fake = makeFakeBin(`exit 41`);
