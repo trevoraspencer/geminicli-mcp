@@ -89,7 +89,9 @@ function matchesType(value: unknown, type: string): boolean {
  * The check is intentionally conservative: it may reject some safe patterns
  * that happen to look complex, but it will never allow a truly pathological
  * nested-quantifier pattern through. Ordinary patterns used in JSON Schema
- * (emails, dates, identifiers, etc.) are unaffected.
+ * (emails, dates, identifiers, and optional-suffix idioms like
+ * `^\d+(\.\d+)?$`) are unaffected: a quantified group followed by `?` runs
+ * at most once and is not treated as a nested quantifier.
  */
 
 /** Maximum allowed pattern string length. */
@@ -100,7 +102,10 @@ const MAX_PATTERN_LENGTH = 1024;
  *
  * Walks the pattern looking for groups whose contents end with a quantifier
  * (`+`, `*`, or `{n,m}`) and where the group itself is followed by a
- * quantifier. This catches `(a+)+`, `(x*)+`, `((a|b)+)*`, etc.
+ * quantifier that permits repetition (`+`, `*`, `{n,}`, or `{n,m}` with
+ * max > 1). This catches `(a+)+`, `(x*)+`, `((a|b)+)*`, `(a+){2,}`, etc.
+ * while leaving the group-runs-at-most-once forms `(a+)?` / `(a+){0,1}`
+ * alone.
  *
  * The approach is a simple state machine rather than a full regex parser:
  * it tracks group nesting depth and whether the last atom inside a group
@@ -139,17 +144,16 @@ function hasNestedQuantifiers(pattern: string): boolean {
       }
       const groupHadQuantifier = lastAtomQuantified;
       lastAtomQuantified = depthStack.pop() ?? false;
-      // Check if the closing group itself is followed by a quantifier.
-      if (groupHadQuantifier && i + 1 < len) {
-        const next = pattern[i + 1];
-        if (
-          next === "+" ||
-          next === "*" ||
-          next === "?" ||
-          next === "{"
-        ) {
-          return true; // Nested quantifier detected.
-        }
+      // Check if the closing group itself is followed by a quantifier that
+      // permits repetition. A `?` (or a `{...}` bound with max <= 1) runs the
+      // group at most once and cannot cause catastrophic backtracking, so the
+      // very common optional-suffix idiom `(X+)?` stays usable.
+      if (
+        groupHadQuantifier &&
+        i + 1 < len &&
+        quantifierAllowsRepetition(pattern, i + 1)
+      ) {
+        return true; // Nested quantifier detected.
       }
       i++;
       continue;
@@ -213,6 +217,28 @@ function hasNestedQuantifiers(pattern: string): boolean {
   }
 
   return false;
+}
+
+/**
+ * Whether the quantifier starting at index `i` allows more than one
+ * repetition of the preceding atom. `+`, `*`, and `{n,}` / `{n,m}` with
+ * max > 1 do; `?` and brace bounds with max <= 1 (`{0,1}`, `{1}`) do not.
+ * A `{` that is not valid quantifier syntax is a literal brace, i.e. not a
+ * quantifier at all.
+ */
+function quantifierAllowsRepetition(pattern: string, i: number): boolean {
+  const ch = pattern[i];
+  if (ch === "+" || ch === "*") return true;
+  if (ch === "?") return false;
+  if (ch !== "{") return false;
+  const close = pattern.indexOf("}", i + 1);
+  if (close === -1) return false; // unterminated -> literal '{'
+  const bounds = pattern.slice(i + 1, close);
+  const m = /^(\d+)(?:,(\d*))?$/.exec(bounds);
+  if (!m) return false; // not {n} / {n,} / {n,m} syntax -> literal '{'
+  if (m[2] === undefined) return Number(m[1]) > 1; // {n}
+  if (m[2] === "") return true; // {n,} — unbounded
+  return Number(m[2]) > 1; // {n,m}
 }
 
 function isQuantifier(pattern: string, i: number): boolean {

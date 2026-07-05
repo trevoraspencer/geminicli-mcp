@@ -158,6 +158,44 @@ test("validate: non-string value skips pattern check entirely", () => {
   assert.equal(errs.length, 0); // no type constraint => no error
 });
 
+test("validate: optional-suffix pattern (X+)? is accepted as safe (review finding 3)", () => {
+  // Regression: `?` after a quantified group runs the group at most once and
+  // cannot backtrack catastrophically, but it used to be flagged as ReDoS.
+  const decimal = { type: "string", pattern: "^\\d+(\\.\\d+)?$" };
+  assert.equal(validate("1.25", decimal).length, 0);
+  assert.equal(validate("7", decimal).length, 0);
+  const errs = validate("not-a-number", decimal);
+  assert.equal(errs.length, 1);
+  assert.match(errs[0].message, /does not match pattern/);
+});
+
+test("validate: semver-ish optional suffix pattern is accepted as safe (review finding 3)", () => {
+  const schema = { type: "string", pattern: "^\\d+\\.\\d+\\.\\d+(-[a-z]+)?$" };
+  assert.equal(validate("1.2.3-beta", schema).length, 0);
+  assert.equal(validate("1.2.3", schema).length, 0);
+  assert.equal(validate("1.2", schema).length, 1);
+});
+
+test("validate: brace bounds after a quantified group are inspected (review finding 3)", () => {
+  // Max <= 1: group runs at most once — safe.
+  assert.equal(validate("aa", { type: "string", pattern: "^(a+){0,1}$" }).length, 0);
+  // Unbounded {2,}: repetition allowed — still rejected.
+  const unbounded = validate("hello", { type: "string", pattern: "(a+){2,}" });
+  assert.equal(unbounded.length, 1);
+  assert.match(unbounded[0].message, /ReDoS/i);
+  // Bounded max > 1: still rejected (conservative).
+  const bounded = validate("hello", { type: "string", pattern: "(a+){2,3}" });
+  assert.equal(bounded.length, 1);
+  assert.match(bounded[0].message, /ReDoS/i);
+});
+
+test("validate: optional group nested inside a repeated group is still rejected (review finding 3)", () => {
+  // ((a+)?)+ is (a*)*-shaped — the outer + repeats — must stay flagged.
+  const errs = validate("hello", { type: "string", pattern: "((a+)?)+" });
+  assert.equal(errs.length, 1);
+  assert.match(errs[0].message, /ReDoS/i);
+});
+
 test("validate: very long pattern is rejected", () => {
   const longPattern = "a".repeat(2048);
   const schema = { type: "string", pattern: longPattern };
