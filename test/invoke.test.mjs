@@ -378,6 +378,58 @@ test("chunked fake-bin output joins and parses to the expected result (VAL-REM-F
   }
 });
 
+test("multibyte UTF-8 split across pipe chunks decodes without U+FFFD corruption (review finding 4)", async () => {
+  // '{"response":"héllo"}' emitted as two delayed writes split mid-é
+  // (0xC3 | 0xA9). Per-chunk Buffer#toString("utf8") decoded this to
+  // 'h��llo'; the per-stream StringDecoder must not.
+  const json = '{"response":"héllo"}';
+  const hex = Buffer.from(json, "utf8").toString("hex");
+  const fake = makeFakeBin(
+    `node -e "const b = Buffer.from('${hex}', 'hex'); process.stdout.write(b.subarray(0, 15)); setTimeout(() => process.stdout.write(b.subarray(15)), 80)"`
+  );
+  try {
+    await withEnv({ GEMINI_CLI_BIN: fake }, async () => {
+      const r = await invokeGemini({ prompt: "hi" });
+      assert.equal(r.exitCode, 0);
+      assert.equal(r.text, "héllo");
+      assert.ok(
+        !r.raw.includes("�"),
+        `raw contains replacement chars: ${r.raw}`
+      );
+    });
+  } finally {
+    try { fs.unlinkSync(fake); } catch {}
+  }
+});
+
+test("output cap counts bytes, not UTF-16 code units, for multibyte output (review finding 4)", async () => {
+  // 32 emoji = 128 UTF-8 bytes but only 64 UTF-16 code units. With a 64-byte
+  // cap the child must be truncated after 16 emoji; the old code compared
+  // code units, letting all 128 bytes through untruncated (up to ~4x the
+  // configured cap for astral-plane content).
+  const emoji = "\u{1F600}";
+  const fake = makeFakeBin(`printf '${emoji.repeat(32)}'`);
+  try {
+    await withEnv(
+      { GEMINI_CLI_BIN: fake, GEMINICLI_MCP_MAX_OUTPUT_BYTES: "64" },
+      async () => {
+        const r = await invokeGemini({ prompt: "hi" });
+        assert.equal(r.truncated, true, "cap must trigger on byte count");
+        const noticeIdx = r.raw.indexOf("\n[geminicli-mcp:");
+        const content = noticeIdx === -1 ? r.raw : r.raw.slice(0, noticeIdx);
+        assert.ok(
+          Buffer.byteLength(content, "utf8") <= 64,
+          `accumulated ${Buffer.byteLength(content, "utf8")} bytes, cap is 64`
+        );
+        assert.equal(content, emoji.repeat(16), "exactly 16 emoji fit in 64 bytes");
+        assert.ok(!content.includes("�"), "no replacement chars at the cut");
+      }
+    );
+  } finally {
+    try { fs.unlinkSync(fake); } catch {}
+  }
+});
+
 test("tryParseJson parses whole-buffer JSON without line splitting (AUDIT-PERF-002 regression)", () => {
   // Single JSON object on one line — the fast whole-buffer path should handle it.
   const parsed = tryParseJson('{"response":"fast path"}');

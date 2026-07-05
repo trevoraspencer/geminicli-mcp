@@ -5,6 +5,7 @@
  */
 import { spawn } from "node:child_process";
 import os from "node:os";
+import { StringDecoder } from "node:string_decoder";
 import { extractJson, formatErrors, validate, type JsonSchema } from "./schema.js";
 
 /**
@@ -250,6 +251,13 @@ function runCli(
     // string concatenation (AUDIT-PERF-001).
     const stdoutChunks: string[] = [];
     const stderrChunks: string[] = [];
+    // One stateful decoder per stream: a multibyte UTF-8 sequence split
+    // across two pipe chunks must not decode to U+FFFD replacement chars,
+    // which per-chunk Buffer#toString("utf8") produced.
+    const stdoutDecoder = new StringDecoder("utf8");
+    const stderrDecoder = new StringDecoder("utf8");
+    // Byte counts (Buffer lengths) — the cap is documented as bytes, so it
+    // must not count UTF-16 code units of the decoded text.
     let stdoutLen = 0;
     let stderrLen = 0;
     let truncated = false;
@@ -280,32 +288,36 @@ function runCli(
     const onAbort = () => killWith("aborted");
     if (signal) signal.addEventListener("abort", onAbort, { once: true });
 
-    child.stdout.on("data", (c) => {
-      const chunk = c.toString("utf8");
-      if (stdoutLen + chunk.length > cap) {
-        const slice = chunk.slice(0, Math.max(0, cap - stdoutLen));
-        if (slice.length > 0) {
-          stdoutChunks.push(slice);
-          stdoutLen += slice.length;
+    child.stdout.on("data", (c: Buffer) => {
+      if (stdoutLen + c.length > cap) {
+        const room = Math.max(0, cap - stdoutLen);
+        if (room > 0) {
+          // Decode only the bytes that fit; the decoder withholds any
+          // trailing partial character instead of emitting U+FFFD.
+          const slice = stdoutDecoder.write(c.subarray(0, room));
+          if (slice.length > 0) stdoutChunks.push(slice);
+          stdoutLen += room;
         }
         killWith("truncated");
       } else {
-        stdoutChunks.push(chunk);
-        stdoutLen += chunk.length;
+        const chunk = stdoutDecoder.write(c);
+        if (chunk.length > 0) stdoutChunks.push(chunk);
+        stdoutLen += c.length;
       }
     });
-    child.stderr.on("data", (c) => {
-      const chunk = c.toString("utf8");
-      if (stderrLen + chunk.length > cap) {
-        const slice = chunk.slice(0, Math.max(0, cap - stderrLen));
-        if (slice.length > 0) {
-          stderrChunks.push(slice);
-          stderrLen += slice.length;
+    child.stderr.on("data", (c: Buffer) => {
+      if (stderrLen + c.length > cap) {
+        const room = Math.max(0, cap - stderrLen);
+        if (room > 0) {
+          const slice = stderrDecoder.write(c.subarray(0, room));
+          if (slice.length > 0) stderrChunks.push(slice);
+          stderrLen += room;
         }
         killWith("truncated");
       } else {
-        stderrChunks.push(chunk);
-        stderrLen += chunk.length;
+        const chunk = stderrDecoder.write(c);
+        if (chunk.length > 0) stderrChunks.push(chunk);
+        stderrLen += c.length;
       }
     });
 
@@ -325,6 +337,14 @@ function runCli(
       } else {
         exitCode = 1;
       }
+      // Flush any bytes still buffered in the decoders. A stream that ended
+      // mid-character (truncated at the byte cap or killed mid-write) yields
+      // the standard U+FFFD replacement character here, same as
+      // readable.setEncoding would.
+      const stdoutTail = stdoutDecoder.end();
+      if (stdoutTail.length > 0) stdoutChunks.push(stdoutTail);
+      const stderrTail = stderrDecoder.end();
+      if (stderrTail.length > 0) stderrChunks.push(stderrTail);
       let stdout = stdoutChunks.join("");
       let stderr = stderrChunks.join("");
       if (truncated) {

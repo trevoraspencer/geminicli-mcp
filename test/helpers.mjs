@@ -106,6 +106,18 @@ if (body === "exit 1") {
   const jsonMatch = body.match(/node -e '(".*?")\\.split/);
   if (!jsonMatch) throw new Error("Unsupported chunked-output body: " + body);
   for (const c of JSON.parse(jsonMatch[1])) writeStdout(c);
+} else if (body.includes("Buffer.from('") && body.includes("subarray(0, ")) {
+  // Split-write body: emits a hex-encoded buffer in two chunks with a delay,
+  // cutting a multibyte UTF-8 sequence in half (review finding 4).
+  const hexMatch = body.match(/Buffer\\.from\\('([0-9a-fA-F]+)', 'hex'\\)/);
+  const splitMatch = body.match(/subarray\\(0, (\\d+)\\)/);
+  if (!hexMatch || !splitMatch) {
+    throw new Error("Unsupported split-write body: " + body);
+  }
+  const buf = Buffer.from(hexMatch[1], "hex");
+  const at = Number(splitMatch[1]);
+  process.stdout.write(buf.subarray(0, at));
+  setTimeout(() => process.stdout.write(buf.subarray(at)), 80);
 } else {
   throw new Error("Unsupported fake bin body on Windows: " + body);
 }
