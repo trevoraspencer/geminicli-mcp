@@ -9,6 +9,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -136,3 +138,52 @@ test("MCP stdio: initialize + tools/list returns exactly 3 tools (VAL-REM-F12-00
     child.stderr.destroy();
   }
 });
+
+// Regression test: on POSIX, npm installs the `bin` entry as a symlink
+// (<prefix>/bin/geminicli-mcp -> .../dist/index.js). isEntryPoint() must
+// follow that symlink, otherwise the server exits 0 without ever starting
+// and the README's primary usage (`"command": "geminicli-mcp"`) is broken.
+// Windows uses cmd shims that exec the real path, so this is POSIX-only.
+test(
+  "MCP stdio: server starts when launched through a bin-style symlink",
+  { skip: process.platform === "win32" ? "npm uses cmd shims, not symlinks, on Windows" : false },
+  async () => {
+    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "geminicli-mcp-bin-"));
+    const shimPath = path.join(binDir, "geminicli-mcp");
+    fs.symlinkSync(serverPath, shimPath);
+
+    const child = spawn("node", [shimPath], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env },
+      cwd: binDir, // not the repo root: the endsWith fallback must not be what saves us
+    });
+
+    const stderrChunks = [];
+    child.stderr.on("data", (c) => stderrChunks.push(c));
+
+    try {
+      const initMsg = JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "stdio-symlink-test", version: "1.0.0" },
+        },
+      });
+      child.stdin.write(initMsg + "\n");
+
+      const initResp = await readResponse(child);
+      assert.equal(initResp.id, 1, "initialize response id should match request");
+      assert.ok(initResp.result, "initialize should return a result");
+      assert.equal(initResp.result.serverInfo.name, "geminicli-mcp");
+    } finally {
+      child.kill();
+      child.stdin.destroy();
+      child.stdout.destroy();
+      child.stderr.destroy();
+      fs.rmSync(binDir, { recursive: true, force: true });
+    }
+  }
+);
