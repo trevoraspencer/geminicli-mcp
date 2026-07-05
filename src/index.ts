@@ -322,15 +322,18 @@ async function main() {
 }
 
 // Only auto-start when invoked as the entry point; importing the module (e.g.
-// from tests) must NOT spawn the stdio transport. We resolve both ends of the
-// comparison to absolute paths so symlinks, Windows path quirks, and
-// relative-argv launches still work.
+// from tests) must NOT spawn the stdio transport. Both sides of the
+// comparison are canonicalized with fs.realpathSync so the npm bin shim —
+// on POSIX a symlink named `geminicli-mcp` pointing at dist/index.js —
+// resolves to the same real path as import.meta.url and still matches, as
+// do relative-argv launches. Library imports never match: argv[1] is the
+// importing script, not this file.
 function isEntryPoint(): boolean {
   const argv1 = process.argv[1];
   if (!argv1) return false;
   try {
-    const here = path.resolve(fileURLToPath(import.meta.url));
-    const launched = path.resolve(argv1);
+    const here = fs.realpathSync(path.resolve(fileURLToPath(import.meta.url)));
+    const launched = fs.realpathSync(path.resolve(argv1));
     if (here === launched) return true;
   } catch {
     // fall through to the endsWith fallback
