@@ -41,7 +41,7 @@
     "start": "node dist/index.js",
     "dev": "tsc --watch",
     "lint": "eslint src/",
-    "test": "node --test test/*.test.mjs",
+    "test": "node --test",
     "test:live": "GEMINICLI_MCP_LIVE=1 node --test test/*.test.mjs",
     "prepublishOnly": "npm run build && npm test",
     "prepare": "husky"
