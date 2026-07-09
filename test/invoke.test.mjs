@@ -214,7 +214,11 @@ test("signalNameToNumber returns undefined for unknown signal names", () => {
   assert.equal(signalNameToNumber("SIGFAKE"), undefined);
 });
 
-test("SIGKILL-killed child returns POSIX exit code 137 (VAL-REM-F08-001)", async () => {
+test("SIGKILL-killed child returns POSIX exit code 137 (VAL-REM-F08-001)", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("Windows does not report POSIX signal exit codes for killed child processes");
+    return;
+  }
   // Use a fake bin that sleeps briefly then kills itself with SIGKILL.
   // We use a Node.js script to ensure precise signal delivery.
   const fake = makeFakeBin(`node -e 'setTimeout(()=>{},50); process.kill(process.pid,"SIGKILL")'`);
@@ -301,7 +305,11 @@ test("stderr is available on a zero-exit success-path result (VAL-REM-F09-003)",
 
 // --- Non-ENOENT spawn errors (REM-F10) ------------------------------------
 
-test("EACCES non-executable binary returns structured result instead of throwing (VAL-REM-F10-001)", async () => {
+test("EACCES non-executable binary returns structured result instead of throwing (VAL-REM-F10-001)", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("Windows reports non-executable scripts as spawn UNKNOWN instead of POSIX EACCES");
+    return;
+  }
   // Create a file that exists but is NOT executable (no +x bits).
   const noExecFile = path.join(
     os.tmpdir(),
