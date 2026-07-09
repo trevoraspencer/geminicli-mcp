@@ -75,8 +75,8 @@ include a strong rationale and discussion in an issue first.
    ```bash
    npm run build && npm test && npm pack --dry-run
    ```
-   CI will run the same on Node 20 and 22; please make sure it's green on
-   your machine first.
+   Required PR CI runs the same checks on current Node/Linux. Broader Node and
+   OS coverage lives in the manual compatibility workflow.
 5. **Update docs** (`README.md`, `CHANGELOG.md`) when you change observable
    behaviour. Add a `## [Unreleased]` section to `CHANGELOG.md` if one is
    not already present.

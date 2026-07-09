@@ -65,7 +65,7 @@ function loop(stream, text) {
 }
 
 function exitAfter(ms, code) {
-  setTimeout(() => process.exit(code), ms).unref();
+  setTimeout(() => process.exit(code), ms);
 }
 
 if (body === "exit 1") {
@@ -81,9 +81,20 @@ if (body === "exit 1") {
 } else if (body === "(sleep 3; kill $$ 2>/dev/null) & while :; do printf 'y\\\\n'; done") {
   exitAfter(3_000, 143);
   loop(process.stdout, "y\\n");
+} else if (body === "printf 'yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy'; sleep 1; exit 143") {
+  writeStdout("yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy");
+  exitAfter(1_000, 143);
 } else if (body === "node -e 'setTimeout(()=>{},50); process.kill(process.pid,\\"SIGKILL\\")'") {
   setTimeout(() => {}, 50);
   process.kill(process.pid, "SIGKILL");
+} else if (body === "printf '{\\"response\\":\\"chunked '; printf 'hello '; printf 'world\\"}'") {
+  writeStdout('{"response":"chunked ');
+  writeStdout("hello ");
+  writeStdout('world"}');
+} else if (body === "printf '{\\"response\\":\\"h\\\\303'; sleep 0.08; printf '\\\\251llo\\"}'") {
+  const buf = Buffer.from("7b22726573706f6e7365223a2268c3a96c6c6f227d", "hex");
+  process.stdout.write(buf.subarray(0, 15));
+  setTimeout(() => process.stdout.write(buf.subarray(15)), 80);
 } else if (body.startsWith("printf ")) {
   if (!body.startsWith("printf '") || !body.endsWith("'")) {
     throw new Error("Unsupported fake printf body: " + body);

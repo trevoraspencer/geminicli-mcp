@@ -361,10 +361,10 @@ test("abort-plus-cap race keeps truncated: true when data was truncated (VAL-REM
 test("chunked fake-bin output joins and parses to the expected result (VAL-REM-F11-002)", async () => {
   // Simulate a CLI that emits JSON in multiple small writes (many chunks).
   // The chunk-array accumulation must join them into a single valid JSON string.
-  // Write the JSON object character-by-character to force many tiny chunks.
-  const json = '{"response":"chunked hello world"}';
+  // Write the JSON object in several shell writes to force multiple chunks
+  // without depending on a nested Node subprocess inside the fake CLI.
   const fake = makeFakeBin(
-    `node -e '${JSON.stringify(json)}.split("").forEach(c => process.stdout.write(c))'`
+    `printf '{"response":"chunked '; printf 'hello '; printf 'world"}'`
   );
   try {
     await withEnv({ GEMINI_CLI_BIN: fake }, async () => {
@@ -384,9 +384,8 @@ test("multibyte UTF-8 split across pipe chunks decodes without U+FFFD corruption
   // (0xC3 | 0xA9). Per-chunk Buffer#toString("utf8") decoded this to
   // 'h��llo'; the per-stream StringDecoder must not.
   const json = '{"response":"héllo"}';
-  const hex = Buffer.from(json, "utf8").toString("hex");
   const fake = makeFakeBin(
-    `node -e "const b = Buffer.from('${hex}', 'hex'); process.stdout.write(b.subarray(0, 15)); setTimeout(() => process.stdout.write(b.subarray(15)), 80)"`
+    `printf '{"response":"h\\303'; sleep 0.08; printf '\\251llo"}'`
   );
   try {
     await withEnv({ GEMINI_CLI_BIN: fake }, async () => {
@@ -889,14 +888,14 @@ test("npm test passes without GEMINICLI_MCP_DEBUG set (VAL-REM-F19-003)", async 
   }
 });
 
-test("killFailed is true when child.kill throws (VAL-FOLLOWUP-DOCS-CI-003)", async () => {
+test("killFailed is true when child.kill throws (VAL-FOLLOWUP-DOCS-CI-003)", { timeout: 7000 }, async () => {
   // Deterministically exercise the killFailed: true branch by overriding
   // ChildProcess.prototype.kill to throw, then triggering truncation which
   // calls killWith → child.kill("SIGTERM") → catch → killFailed = true.
-  // The fake bin self-terminates after 3s so the test doesn't hang even if
-  // the overridden kill prevents normal SIGTERM delivery.
+  // The fake bin emits enough output to exceed the cap, then exits on its own
+  // after 1s so the test cannot hang if the overridden kill prevents SIGTERM.
   const fake = makeFakeBin(
-    `(sleep 3; kill $$ 2>/dev/null) & while :; do printf 'y\\n'; done`
+    "printf 'yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy'; sleep 1; exit 143"
   );
 
   const origKill = ChildProcess.prototype.kill;
