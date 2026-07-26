@@ -31,6 +31,7 @@
   ],
   "files": [
     "dist/**/*.js",
+    "dist/**/*.js.map",
     "dist/**/*.d.ts",
     "README.md",
     "LICENSE",
@@ -43,11 +44,14 @@
     "lint": "eslint src/",
     "test": "node --test",
     "test:live": "GEMINICLI_MCP_LIVE=1 node --test test/*.test.mjs",
-    "prepublishOnly": "npm run build && npm test",
+    "prepublishOnly": "npm run build && npm run lint && npm test",
     "prepare": "husky"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4"
+  },
+  "overrides": {
+    "@hono/node-server": "^2.0.5"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

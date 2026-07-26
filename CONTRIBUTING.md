@@ -73,7 +73,7 @@ include a strong rationale and discussion in an issue first.
    `test/`. Bug fixes should ship with a regression test.
 4. **Run the full check locally** before pushing:
    ```bash
-   npm run build && npm test && npm pack --dry-run
+   npm run build && npm run lint && npm test && npm pack --dry-run
    ```
    Required PR CI runs the same checks on current Node/Linux. Broader Node and
    OS coverage lives in the manual compatibility workflow.
@@ -102,7 +102,7 @@ For maintainers cutting a release:
    above it. Update the comparison links at the bottom.
 4. Verify locally:
    ```bash
-   npm run build && npm test && npm pack --dry-run
+   npm run build && npm run lint && npm test && npm pack --dry-run
    ```
 5. Commit, tag, and push:
    ```bash
@@ -112,7 +112,7 @@ For maintainers cutting a release:
    ```
 6. Publish:
    ```bash
-   npm publish      # prepublishOnly runs the build for you
+   npm publish      # prepublishOnly rebuilds, lints, and tests
    ```
 7. Open a GitHub release for the tag and paste the changelog section into it.
 

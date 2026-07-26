@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import {
   validateToolArgs,
@@ -28,7 +28,7 @@ test("runtime PACKAGE_VERSION matches package.json version (AUDIT-CORR-004 regre
     id: 1,
     method: "initialize",
     params: {
-      protocolVersion: "2025-06-18",
+      protocolVersion: "2025-11-25",
       capabilities: {},
       clientInfo: { name: "test", version: "0.0.0" },
     },
@@ -59,6 +59,44 @@ test("runtime PACKAGE_VERSION matches package.json version (AUDIT-CORR-004 regre
   );
 });
 
+test("importing from an unrelated dist/index.js does not auto-start stdio", () => {
+  const tempRoot = fs.mkdtempSync(
+    path.join(path.dirname(rootDir), "geminicli-mcp-import-")
+  );
+  const scriptDir = path.join(tempRoot, "dist");
+  const scriptPath = path.join(scriptDir, "index.js");
+  fs.mkdirSync(scriptDir);
+  fs.writeFileSync(
+    scriptPath,
+    `import(${JSON.stringify(
+      pathToFileURL(path.join(rootDir, "dist", "index.js")).href
+    )}).then(() => console.log("imported"));\n`
+  );
+  const init = JSON.stringify({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: {
+      protocolVersion: "2025-11-25",
+      capabilities: {},
+      clientInfo: { name: "import-test", version: "0.0.0" },
+    },
+  });
+  try {
+    const child = spawnSync(process.execPath, [scriptPath], {
+      input: `${init}\n`,
+      encoding: "utf8",
+      cwd: tempRoot,
+      timeout: 5_000,
+    });
+    assert.equal(child.error, undefined);
+    assert.equal(child.status, 0, child.stderr);
+    assert.equal(child.stdout.trim(), "imported");
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("validateToolArgs: gemini_prompt requires a non-empty string prompt", () => {
   assert.throws(
     () => validateToolArgs(GEMINI_TOOL.name, {}),
@@ -72,6 +110,38 @@ test("validateToolArgs: gemini_prompt requires a non-empty string prompt", () =>
     () => validateToolArgs(GEMINI_TOOL.name, { prompt: "" }),
     /non-empty/
   );
+  assert.throws(
+    () => validateToolArgs(GEMINI_TOOL.name, null),
+    /arguments must be an object/
+  );
+  assert.throws(
+    () => validateToolArgs(GEMINI_TOOL.name, []),
+    /arguments must be an object/
+  );
+  assert.throws(
+    () => validateToolArgs(GEMINI_TOOL.name, { prompt: "before\0after" }),
+    /NUL/
+  );
+});
+
+test("validateToolArgs rejects arguments not declared by each tool", () => {
+  assert.throws(
+    () =>
+      validateToolArgs(GEMINI_TOOL.name, {
+        prompt: "hi",
+        working_dir: "/tmp",
+      }),
+    /Unexpected argument.*working_dir/
+  );
+  assert.throws(
+    () =>
+      validateToolArgs(GEMINI_TOOL_WITH_CONTEXT.name, {
+        prompt: "hi",
+        context: "ctx",
+        schema: {},
+      }),
+    /Unexpected argument.*schema/
+  );
 });
 
 test("validateToolArgs: gemini_prompt rejects non-string model", () => {
@@ -84,7 +154,7 @@ test("validateToolArgs: gemini_prompt rejects non-string model", () => {
 test("validateToolArgs: gemini_prompt rejects flag-shaped model values", () => {
   // argv-flag injection: a model starting with '-' or containing whitespace
   // could be re-parsed by the gemini CLI as another flag.
-  for (const bad of ["--help", "-p evil", "gemini 2.5", " ", "\tfoo"]) {
+  for (const bad of ["", "--help", "-p evil", "gemini 2.5", " ", "\tfoo"]) {
     assert.throws(
       () => validateToolArgs(GEMINI_TOOL.name, { prompt: "hi", model: bad }),
       /model.*must match/,
@@ -127,6 +197,14 @@ test("validateToolArgs: gemini_prompt_with_context requires context as string", 
         context: 123,
       }),
     /context.*must be a string/
+  );
+  assert.throws(
+    () =>
+      validateToolArgs(GEMINI_TOOL_WITH_CONTEXT.name, {
+        prompt: "hi",
+        context: "before\0after",
+      }),
+    /context.*NUL/
   );
 });
 
@@ -188,6 +266,25 @@ test("validateToolArgs: gemini_prompt_structured accepts schema + optional conte
   });
 });
 
+test("validateToolArgs: gemini_prompt_structured rejects malformed nested schemas", () => {
+  assert.throws(
+    () =>
+      validateToolArgs(GEMINI_TOOL_STRUCTURED.name, {
+        prompt: "hi",
+        schema: { properties: { broken: 1 } },
+      }),
+    /Invalid `schema`.*must be a schema object/s
+  );
+  assert.throws(
+    () =>
+      validateToolArgs(GEMINI_TOOL_STRUCTURED.name, {
+        prompt: "hi",
+        schema: { allOf: [null] },
+      }),
+    /Invalid `schema`.*must be a schema object/s
+  );
+});
+
 test("validateToolArgs: gemini_prompt_structured rejects non-string context", () => {
   assert.throws(
     () =>
@@ -222,6 +319,17 @@ test("MCP tool definitions advertise the three expected tools", () => {
     "prompt",
     "schema",
   ]);
+  for (const tool of [
+    GEMINI_TOOL,
+    GEMINI_TOOL_WITH_CONTEXT,
+    GEMINI_TOOL_STRUCTURED,
+  ]) {
+    assert.equal(tool.inputSchema.properties.prompt.minLength, 1);
+    assert.equal(
+      tool.inputSchema.properties.model.pattern,
+      "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    );
+  }
 
   // additionalProperties must be off so callers can't sneak in extra fields.
   assert.equal(GEMINI_TOOL.inputSchema.additionalProperties, false);

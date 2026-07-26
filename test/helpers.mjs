@@ -95,6 +95,8 @@ if (body === "exit 1") {
   const buf = Buffer.from("7b22726573706f6e7365223a2268c3a96c6c6f227d", "hex");
   process.stdout.write(buf.subarray(0, 15));
   setTimeout(() => process.stdout.write(buf.subarray(15)), 80);
+} else if (body === 'node -e \\'process.stdout.write(JSON.stringify({response:"x".repeat(256)}))\\'') {
+  writeStdout(JSON.stringify({ response: "x".repeat(256) }));
 } else if (body.startsWith("printf ")) {
   if (!body.startsWith("printf '") || !body.endsWith("'")) {
     throw new Error("Unsupported fake printf body: " + body);

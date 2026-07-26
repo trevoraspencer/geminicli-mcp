@@ -51,6 +51,26 @@ test("handleCallTool: failed gemini invocation maps to isError=true with [error 
   }
 });
 
+test("handleCallTool does not duplicate stderr used as the primary error text", async () => {
+  const fake = makeFakeBin(`echo "auth bonk: please run gemini once" >&2; exit 41`);
+  try {
+    await withEnv({ GEMINI_CLI_BIN: fake }, async () => {
+      const out = await handleCallTool({
+        params: { name: "gemini_prompt", arguments: { prompt: "hi" } },
+      });
+      assert.equal(out.isError, true);
+      const text = out.content[0].text;
+      assert.equal(
+        text.match(/auth bonk: please run gemini once/g)?.length,
+        1
+      );
+      assert.doesNotMatch(text, /--- stderr ---/);
+    });
+  } finally {
+    try { fs.unlinkSync(fake); } catch {}
+  }
+});
+
 test("handleCallTool: missing gemini binary surfaces exit=127", async () => {
   await withEnv({ GEMINI_CLI_BIN: "/does/not/exist/at/all-xyz" }, async () => {
     const out = await handleCallTool({

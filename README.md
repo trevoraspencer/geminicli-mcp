@@ -1,8 +1,7 @@
 # geminicli-mcp
 
 [![CI](https://github.com/trevoraspencer/geminicli-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/trevoraspencer/geminicli-mcp/actions/workflows/ci.yml)
-[![npm version](https://img.shields.io/npm/v/geminicli-mcp.svg)](https://www.npmjs.com/package/geminicli-mcp)
-[![Node.js Version](https://img.shields.io/node/v/geminicli-mcp.svg)](https://nodejs.org/)
+[![Node.js ≥ 20](https://img.shields.io/badge/node-%E2%89%A520-brightgreen.svg)](https://nodejs.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
 Stateless stdio MCP server wrapping the headless **Gemini CLI**.
@@ -20,19 +19,27 @@ Stateless stdio MCP server wrapping the headless **Gemini CLI**.
 ## Prerequisites
 
 - **Node.js ≥ 20**
-- **[@google/gemini-cli](https://github.com/google-gemini/gemini-cli) ≥ 0.6.1**
-  — this server invokes the CLI with `--output-format json`, which is only
-  recognised by gemini-cli 0.6.1 and newer
-  ([upstream PR #8119](https://github.com/google-gemini/gemini-cli/pull/8119)).
+- **[@google/gemini-cli](https://github.com/google-gemini/gemini-cli) ≥ 0.40.0**
+  — this server uses both `--output-format json` and `--skip-trust` for
+  reliable non-interactive execution. JSON output first appeared in 0.6.1
+  ([upstream PR #8119](https://github.com/google-gemini/gemini-cli/pull/8119));
+  `--skip-trust` requires 0.40.0 or newer.
 
-## Install from npm
+## Install from source
+
+`geminicli-mcp` is not currently published to npm. Until the first release,
+install and link a checkout:
 
 ```bash
-npm install -g geminicli-mcp
+git clone https://github.com/trevoraspencer/geminicli-mcp.git
+cd geminicli-mcp
+npm ci
+npm run build
+npm link
 ```
 
-This exposes the `geminicli-mcp` binary on your `PATH`. Point your MCP client
-at it:
+This exposes the locally built `geminicli-mcp` binary on your `PATH`. Point
+your MCP client at it:
 
 ```jsonc
 // e.g. ~/.config/<your-client>/mcp.json
@@ -50,16 +57,6 @@ You also need the headless Gemini CLI installed and authenticated:
 ```bash
 npm install -g @google/gemini-cli
 gemini  # one-time interactive auth
-```
-
-## Install from source
-
-```bash
-git clone https://github.com/trevoraspencer/geminicli-mcp.git
-cd geminicli-mcp
-npm install
-npm run build
-node dist/index.js
 ```
 
 ## Tools
@@ -118,7 +115,12 @@ all primitive types plus `array` and `object`), `required`, `properties`,
 `items`, `additionalProperties`, `enum`, `const`, `minLength`/`maxLength`,
 `minItems`/`maxItems`, `minimum`/`maximum`, `pattern`, and the `anyOf` /
 `oneOf` / `allOf` combinators. It is deliberately small — if you need full
-JSON Schema 2020-12, pre-validate on the caller side.
+JSON Schema 2020-12, pre-validate on the caller side. Schema input is limited
+to 1 MiB, 10,000 nested schema nodes, and 64 levels of schema nesting.
+Potentially super-linear `pattern` shapes are rejected conservatively before
+the model is invoked; patterns containing repetition must be start-anchored.
+Individual pattern inputs are limited to 65,536 characters, with a
+262,144-character aggregate pattern-evaluation budget per response.
 
 ## Examples
 
@@ -135,12 +137,13 @@ or invokes a tool from the command line.
   see the Windows note under Troubleshooting.
 - `GEMINICLI_MCP_MAX_OUTPUT_BYTES` — cap (per stream) on bytes accumulated
   from the gemini child's stdout/stderr before the server kills it (default:
-  33554432 / 32 MiB). Guards against a runaway child OOM-ing the server.
+  33554432 / 32 MiB). The value must be a positive base-10 integer; invalid
+  values use the default. Guards against a runaway child OOM-ing the server.
 - `GEMINICLI_MCP_DEBUG` — when set to `1`, `true`, or `yes`, emits structured
-  JSON diagnostics to stderr (invocation args, exit codes, durations, stderr
-  content, kill-failure markers). Safe for MCP use: diagnostics go to stderr
-  only and never corrupt the stdio protocol on stdout. Leave unset in
-  production; enable only for targeted debugging.
+  JSON diagnostics to stderr (redacted prompt length, invocation flags, exit
+  codes, durations, output byte counts, and kill-failure markers). Safe for
+  MCP use: diagnostics go to stderr only and never corrupt the stdio protocol
+  on stdout. Leave unset in production; enable only for targeted debugging.
 - Child process env inherits the server's environment, plus forced
   `NO_COLOR=1` / `TERM=dumb`. Anything the server can read — including
   `GEMINI_API_KEY` and friends — the gemini CLI can read.
@@ -156,34 +159,45 @@ The server surfaces the gemini CLI's exit code via the `errorKind` /
 |  `1` | `error`            | general model error or API failure                     |
 | `41` | `auth_required`    | gemini CLI is not authenticated; run `gemini` once     |
 | `42` | `input_validation` | bad arguments (or bad schema, for the structured tool) |
+| `44` | `sandbox_error`    | gemini CLI sandbox setup failed                        |
+| `52` | `config_error`     | gemini CLI configuration is invalid                    |
 | `53` | `turn_limit`       | gemini's turn / tool-call budget was exhausted         |
 |`127` | `error`            | gemini binary not found (set `GEMINI_CLI_BIN`)         |
+|`130` | `cancelled`        | the request or gemini CLI was cancelled                |
 |other | `unknown`          | gemini reported a code outside the documented set      |
 
 ## Security caveats
 
-- **`--approval-mode yolo` is always on.** The server hardcodes this flag so
-  it can run non-interactively. Any tool calls or file edits the gemini CLI
-  performs are auto-approved. Do not expose this MCP server to MCP clients
+- **`--approval-mode yolo` and `--skip-trust` are always on.** The server
+  hardcodes both flags so it can run non-interactively even when the current
+  workspace has no saved Gemini trust decision. Any workspace configuration,
+  tool calls, or file edits the gemini CLI accepts are trusted or
+  auto-approved. Do not expose this MCP server to MCP clients or workspaces
   you don't trust.
 - **No quota controls.** A caller that can reach this server can make
   unlimited gemini API calls at your expense. Gate access at the MCP-client
   layer.
 - **Child inherits the server's env.** Don't place secrets in the server's
   env that you don't want the gemini CLI (and its plugins) to see.
+- **Prompts are process arguments.** Other users with permission to inspect
+  this process may be able to read prompt and context text from the operating
+  system's process list.
+- **Windows cancellation kills the direct child only.** POSIX hosts signal
+  the whole Gemini process group, but Gemini-spawned descendants may outlive
+  a cancelled request on Windows.
 
 ## Troubleshooting
 
-### `Unknown arguments: output-format` / `Unknown arguments: outputFormat`
+### `Unknown arguments: output-format` / `skip-trust`
 
-Your `@google/gemini-cli` is older than 0.6.1, which is when
-`--output-format json` was added
-([upstream PR #8119](https://github.com/google-gemini/gemini-cli/pull/8119)).
-Upgrade:
+Your `@google/gemini-cli` is older than the supported 0.40.0 minimum.
+`--output-format json` was added in 0.6.1
+([upstream PR #8119](https://github.com/google-gemini/gemini-cli/pull/8119)),
+and this server also requires the newer `--skip-trust` flag. Upgrade:
 
 ```bash
 npm install -g @google/gemini-cli@latest
-gemini --version  # confirm ≥ 0.6.1
+gemini --version  # confirm ≥ 0.40.0
 ```
 
 ### "Gemini CLI binary not found" (exit 127)

@@ -21,7 +21,11 @@ import {
   type GeminiResult,
   type InvokeOptions,
 } from "./invoke.js";
-import type { JsonSchema } from "./schema.js";
+import {
+  formatErrors,
+  validateSchemaDefinition,
+  type JsonSchema,
+} from "./schema.js";
 
 /**
  * Read the package version from the root package.json so there is a single
@@ -61,10 +65,12 @@ export const GEMINI_TOOL = {
     properties: {
       prompt: {
         type: "string",
+        minLength: 1,
         description: "Prompt text sent to the Gemini CLI.",
       },
       model: {
         type: "string",
+        pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
         description: "Optional model identifier (e.g., gemini-2.5-pro).",
       },
     },
@@ -82,6 +88,7 @@ export const GEMINI_TOOL_WITH_CONTEXT = {
     properties: {
       prompt: {
         type: "string",
+        minLength: 1,
         description: "Prompt text sent to the Gemini CLI.",
       },
       context: {
@@ -91,6 +98,7 @@ export const GEMINI_TOOL_WITH_CONTEXT = {
       },
       model: {
         type: "string",
+        pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
         description: "Optional model identifier (e.g., gemini-2.5-pro).",
       },
     },
@@ -108,6 +116,7 @@ export const GEMINI_TOOL_STRUCTURED = {
     properties: {
       prompt: {
         type: "string",
+        minLength: 1,
         description: "Prompt text sent to the Gemini CLI.",
       },
       schema: {
@@ -122,6 +131,7 @@ export const GEMINI_TOOL_STRUCTURED = {
       },
       model: {
         type: "string",
+        pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
         description: "Optional model identifier (e.g., gemini-2.5-pro).",
       },
     },
@@ -146,7 +156,11 @@ function toMcpResult(result: GeminiResult) {
       : `[${result.errorKind ?? "unknown"} exit=${result.exitCode}] ${result.text}`;
 
   // Append stderr to non-zero result text when stderr is non-empty.
-  if (result.exitCode !== 0 && result.stderr) {
+  if (
+    result.exitCode !== 0 &&
+    result.stderr &&
+    result.stderr.trim() !== result.text.trim()
+  ) {
     text += `\n--- stderr ---\n${result.stderr}`;
   }
   // Surface truncation and abort metadata for MCP clients.
@@ -181,23 +195,45 @@ export function validateToolArgs(
       context?: string;
       model?: string;
     } {
+  const allowedKeys =
+    toolName === GEMINI_TOOL.name
+      ? new Set(["prompt", "model"])
+      : toolName === GEMINI_TOOL_WITH_CONTEXT.name
+        ? new Set(["prompt", "context", "model"])
+        : toolName === GEMINI_TOOL_STRUCTURED.name
+          ? new Set(["prompt", "schema", "context", "model"])
+          : undefined;
+  if (!allowedKeys) {
+    throw new Error(`Unknown tool: ${toolName}`);
+  }
+  if (typeof args !== "object" || args === null || Array.isArray(args)) {
+    throw new Error("tool arguments must be an object");
+  }
+  const unexpected = Object.keys(args).filter((key) => !allowedKeys.has(key));
+  if (unexpected.length > 0) {
+    throw new Error(
+      `Unexpected argument${unexpected.length === 1 ? "" : "s"}: ${unexpected
+        .map((key) => JSON.stringify(key))
+        .join(", ")}`
+    );
+  }
+
   if (typeof args.prompt !== "string") {
     throw new Error("`prompt` must be a string");
   }
   if (args.prompt.length === 0) {
     throw new Error("`prompt` must be a non-empty string");
   }
+  if (args.prompt.includes("\0")) {
+    throw new Error("`prompt` must not contain NUL characters");
+  }
   if (args.model !== undefined && typeof args.model !== "string") {
     throw new Error("`model` must be a string when provided");
   }
-  const model =
-    typeof args.model === "string" && args.model.length > 0
-      ? args.model
-      : undefined;
+  const model = typeof args.model === "string" ? args.model : undefined;
   if (model !== undefined && !MODEL_RE.test(model)) {
-    // Prevent argv flag injection — `--model <value>` is spliced as a separate
-    // argv element, but if <value> starts with `-` the gemini CLI's parser
-    // will treat it as another flag.
+    // Keep model IDs within the advertised schema and bind them into a
+    // `--model=<value>` argv element so values cannot become CLI flags.
     throw new Error(
       "`model` must match /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/ (model ID like 'gemini-2.5-pro')"
     );
@@ -213,6 +249,9 @@ export function validateToolArgs(
   if (toolName === GEMINI_TOOL_WITH_CONTEXT.name) {
     if (typeof args.context !== "string") {
       throw new Error("`context` must be a string");
+    }
+    if (args.context.includes("\0")) {
+      throw new Error("`context` must not contain NUL characters");
     }
     return {
       kind: "context" as const,
@@ -230,8 +269,20 @@ export function validateToolArgs(
     ) {
       throw new Error("`schema` must be a JSON Schema object");
     }
+    const schemaErrors = validateSchemaDefinition(args.schema);
+    if (schemaErrors.length > 0) {
+      throw new Error(
+        `Invalid \`schema\`:\n${formatErrors(schemaErrors)}`
+      );
+    }
     if (args.context !== undefined && typeof args.context !== "string") {
       throw new Error("`context` must be a string when provided");
+    }
+    if (
+      typeof args.context === "string" &&
+      args.context.includes("\0")
+    ) {
+      throw new Error("`context` must not contain NUL characters");
     }
     return {
       kind: "structured" as const,
@@ -241,6 +292,7 @@ export function validateToolArgs(
       ...(model ? { model } : {}),
     };
   }
+  // The allowed-key dispatch above exhaustively rejects unknown tool names.
   throw new Error(`Unknown tool: ${toolName}`);
 }
 
@@ -334,11 +386,14 @@ function isEntryPoint(): boolean {
   try {
     const here = fs.realpathSync(path.resolve(fileURLToPath(import.meta.url)));
     const launched = fs.realpathSync(path.resolve(argv1));
-    if (here === launched) return true;
+    return here === launched;
   } catch {
-    // fall through to the endsWith fallback
+    // argv[1] must name an existing launch target, so a failed
+    // canonicalization is not safe evidence that this module is the entry
+    // point. In particular, never fall back to matching a generic
+    // `dist/index.js` suffix: an unrelated importer may have that name.
+    return false;
   }
-  return argv1.endsWith(`dist${path.sep}index.js`) || argv1.endsWith("dist/index.js");
 }
 
 const invokedDirectly = isEntryPoint();

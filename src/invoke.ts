@@ -6,7 +6,13 @@
 import { spawn } from "node:child_process";
 import os from "node:os";
 import { StringDecoder } from "node:string_decoder";
-import { extractJson, formatErrors, validate, type JsonSchema } from "./schema.js";
+import {
+  extractJson,
+  formatErrors,
+  validate,
+  validateSchemaDefinition,
+  type JsonSchema,
+} from "./schema.js";
 
 /**
  * Whether debug diagnostics are enabled. When `GEMINICLI_MCP_DEBUG` is set to
@@ -43,7 +49,10 @@ export interface GeminiResult {
     | "error"
     | "auth_required"
     | "input_validation"
+    | "sandbox_error"
+    | "config_error"
     | "turn_limit"
+    | "cancelled"
     | "unknown";
   raw: string;
   /** Raw stderr from the child process, if any. */
@@ -70,8 +79,12 @@ const DEFAULT_MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
 function maxOutputBytes(): number {
   const env = process.env.GEMINICLI_MCP_MAX_OUTPUT_BYTES;
   if (!env) return DEFAULT_MAX_OUTPUT_BYTES;
-  const n = Number.parseInt(env, 10);
-  return Number.isFinite(n) && n > 0 ? n : DEFAULT_MAX_OUTPUT_BYTES;
+  // Number.parseInt("1024garbage", 10) is 1024. Treat the setting as a
+  // configuration value, not a prefix, so a typo cannot silently reduce the
+  // output budget and truncate otherwise-valid responses.
+  if (!/^[1-9]\d*$/.test(env)) return DEFAULT_MAX_OUTPUT_BYTES;
+  const n = Number(env);
+  return Number.isSafeInteger(n) ? n : DEFAULT_MAX_OUTPUT_BYTES;
 }
 
 /**
@@ -107,8 +120,14 @@ export function classifyExitCode(
       return "auth_required";
     case 42:
       return "input_validation";
+    case 44:
+      return "sandbox_error";
+    case 52:
+      return "config_error";
     case 53:
       return "turn_limit";
+    case 130:
+      return "cancelled";
     case 127:
       // Binary not found — matches the README exit-code table and the
       // synthesized ENOENT result from spawnErrorResult().
@@ -165,6 +184,17 @@ export function tryParseJson(raw: string): unknown | undefined {
       // keep scanning
     }
   }
+  // Some CLI versions have emitted a diagnostic line before pretty-printed
+  // JSON. No individual line is valid JSON in that shape, but the balanced
+  // extractor can still recover the complete value.
+  const candidate = extractJson(trimmed);
+  if (candidate !== undefined) {
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // The caller will fall back to the raw output.
+    }
+  }
   return undefined;
 }
 
@@ -189,7 +219,7 @@ export function childEnv(): NodeJS.ProcessEnv {
  * Exposed for testing: callers should not need to build it themselves.
  */
 export function composePrompt(inv: GeminiInvocation): string {
-  if (inv.context && inv.context.length > 0) {
+  if (inv.context !== undefined) {
     return `<context>\n${inv.context}\n</context>\n\n${inv.prompt}`;
   }
   return inv.prompt;
@@ -198,21 +228,24 @@ export function composePrompt(inv: GeminiInvocation): string {
 /**
  * Build the argv array for the Gemini CLI.
  *
- * Flag ordering is intentional: `-p <prompt>` first, then `--output-format json`,
- * then `--approval-mode yolo`, then optional `--model <id>`. The prompt is always
- * a separate argv element — never interpolated into a shell string.
+ * Flag ordering is intentional: the prompt first, then JSON output, workspace
+ * trust, YOLO approval, and the optional model. User-controlled option values
+ * use `--name=value` so a prompt such as `--help` cannot be reinterpreted by
+ * Gemini's argument parser as another flag. Every argument remains a separate
+ * argv element — nothing is interpolated into a shell string.
  */
 export function buildArgv(inv: GeminiInvocation): string[] {
+  const prompt = composePrompt(inv);
   const argv: string[] = [
-    "-p",
-    composePrompt(inv),
+    `--prompt=${prompt}`,
     "--output-format",
     "json",
+    "--skip-trust",
     "--approval-mode",
     "yolo",
   ];
   if (inv.model) {
-    argv.push("--model", inv.model);
+    argv.push(`--model=${inv.model}`);
   }
   return argv;
 }
@@ -252,12 +285,21 @@ function runCli(
       cwd: process.cwd(),
       env: childEnv(),
       stdio: ["ignore", "pipe", "pipe"],
+      // A separate process group lets cancellation/output-cap enforcement
+      // terminate tools spawned by Gemini too, rather than orphaning them.
+      // Windows has no negative-PID process-group signalling, so it keeps the
+      // regular ChildProcess behaviour.
+      detached: process.platform !== "win32",
     });
 
     if (debugEnabled()) {
       debugLog("invoke start", {
         bin,
-        argv: argv.map((a, i) => (i === 1 ? `<prompt ${a.length} chars>` : a)),
+        argv: argv.map((arg) =>
+          arg.startsWith("--prompt=")
+            ? `<prompt ${arg.length - "--prompt=".length} chars>`
+            : arg
+        ),
       });
     }
 
@@ -282,13 +324,30 @@ function runCli(
     let killTimer: NodeJS.Timeout | undefined;
     const startTime = Date.now();
 
+    const signalChildTree = (signalName: NodeJS.Signals) => {
+      if (process.platform !== "win32" && child.pid !== undefined) {
+        try {
+          process.kill(-child.pid, signalName);
+          return;
+        } catch {
+          // The group may have disappeared between the output/abort event and
+          // this call. Fall back to the direct child for portability and for
+          // unusual platforms that do not implement negative-PID signalling.
+        }
+      }
+      child.kill(signalName);
+    };
+
     const killWith = (reason: "truncated" | "aborted") => {
-      if (killed) return;
-      killed = true;
       if (reason === "truncated") truncated = true;
       if (reason === "aborted") aborted = true;
+      // A second reason can arrive while termination is in flight (for
+      // example, the caller aborts just after the output cap fires). Preserve
+      // all observed result metadata, but only signal the child once.
+      if (killed) return;
+      killed = true;
       try {
-        child.kill("SIGTERM");
+        signalChildTree("SIGTERM");
       } catch (killErr) {
         // Record the kill failure for diagnostics (AUDIT-OBS-005).
         killFailed = true;
@@ -304,7 +363,7 @@ function runCli(
       // unref'd and cleared on close, so a cooperative child sees no change.
       killTimer = setTimeout(() => {
         try {
-          child.kill("SIGKILL");
+          signalChildTree("SIGKILL");
         } catch {
           // Child is already gone (or unkillable); close/error handles it.
         }
@@ -355,7 +414,25 @@ function runCli(
     });
     child.on("close", (code, sigName) => {
       if (signal) signal.removeEventListener("abort", onAbort);
-      if (killTimer) clearTimeout(killTimer);
+      if (killTimer) {
+        let keepGroupEscalation = false;
+        if (
+          killed &&
+          process.platform !== "win32" &&
+          child.pid !== undefined
+        ) {
+          try {
+            // The direct child can close while a descendant that redirected
+            // stdio remains in its process group. Keep the pending SIGKILL in
+            // that case; clearing it here would orphan the descendant.
+            process.kill(-child.pid, 0);
+            keepGroupEscalation = true;
+          } catch {
+            // No process remains in the group.
+          }
+        }
+        if (!keepGroupEscalation) clearTimeout(killTimer);
+      }
       let exitCode: number;
       if (typeof code === "number") {
         exitCode = code;
@@ -401,22 +478,35 @@ function runCli(
 }
 
 export function resultFromOutcome(outcome: SpawnOutcome): GeminiResult {
-  const { exitCode, stdout, stderr, truncated, aborted } = outcome;
+  const { stdout, stderr, truncated, aborted } = outcome;
+  // A child may trap SIGTERM and deliberately exit 0. Cancellation and output
+  // truncation still mean the response is incomplete and must never be
+  // surfaced to MCP clients as a successful tool result.
+  const exitCode =
+    outcome.exitCode === 0 && aborted
+      ? 130
+      : outcome.exitCode === 0 && truncated
+        ? 1
+        : outcome.exitCode;
   const parsed = tryParseJson(stdout);
   let text: string | undefined;
   if (parsed && typeof parsed === "object" && parsed !== null) {
     const p = parsed as Record<string, unknown>;
-    if (typeof p.response === "string") text = p.response;
-    else if (typeof p.text === "string") text = p.text;
-    else if (typeof p.output === "string") text = p.output;
-    else if (
+    const errorMessage =
       p.error &&
       typeof p.error === "object" &&
       typeof (p.error as Record<string, unknown>).message === "string"
-    ) {
-      // gemini CLI's JSON shape on failure: {response: "", error: {message, ...}}
-      text = (p.error as Record<string, unknown>).message as string;
-    }
+        ? ((p.error as Record<string, unknown>).message as string)
+        : undefined;
+    // Gemini CLI failures commonly use
+    // { response: "", error: { message, ... } }. Prefer the actual error on a
+    // failed invocation; otherwise the empty response masks it and the caller
+    // only sees a generic "gemini exited N" message.
+    if (exitCode !== 0 && errorMessage) text = errorMessage;
+    else if (typeof p.response === "string") text = p.response;
+    else if (typeof p.text === "string") text = p.text;
+    else if (typeof p.output === "string") text = p.output;
+    else if (errorMessage) text = errorMessage;
   }
   if (text === undefined) text = stdout.trim();
   if (exitCode !== 0 && !text) {
@@ -434,13 +524,23 @@ export function resultFromOutcome(outcome: SpawnOutcome): GeminiResult {
 }
 
 /**
- * Build a structured GeminiResult for spawn errors (ENOENT, EACCES, EPERM,
- * EFTYPE).
+ * Build a structured GeminiResult for spawn errors (ENOENT, E2BIG, EACCES,
+ * EPERM, EFTYPE).
  * ENOENT maps to exit code 127 (command not found); EACCES/EPERM map to
  * exit code 126 (not executable), following POSIX conventions.
  */
 function spawnErrorResult(code: string): GeminiResult {
   const bin = geminiBin();
+  if (code === "E2BIG") {
+    return {
+      text:
+        "The prompt and context are too large for this operating system's " +
+        "process argument limit. Reduce the input size and try again.",
+      exitCode: 42,
+      errorKind: "input_validation",
+      raw: "",
+    };
+  }
   if (code === "ENOENT") {
     return {
       text: `Gemini CLI binary not found at '${bin}'. Install @google/gemini-cli or set GEMINI_CLI_BIN.`,
@@ -464,6 +564,7 @@ function isHandledSpawnError(err: unknown): err is NodeJS.ErrnoException {
   const code = (err as NodeJS.ErrnoException).code;
   return (
     code === "ENOENT" ||
+    code === "E2BIG" ||
     code === "EACCES" ||
     code === "EPERM" ||
     code === "EFTYPE"
@@ -474,8 +575,8 @@ function isHandledSpawnError(err: unknown): err is NodeJS.ErrnoException {
  * Discriminated union returned by {@link safeRunCli}: either a normal
  * {@link SpawnOutcome} from a successful spawn, or a structured
  * {@link GeminiResult} produced when the spawn itself failed with a handled
- * error (ENOENT / EACCES / EPERM / EFTYPE). This lets callers avoid duplicating
- * the try/catch + spawn-error-classification logic.
+ * error (ENOENT / E2BIG / EACCES / EPERM / EFTYPE). This lets callers avoid
+ * duplicating the try/catch + spawn-error-classification logic.
  */
 type SafeCliResult =
   | { kind: "outcome"; value: SpawnOutcome }
@@ -483,8 +584,8 @@ type SafeCliResult =
 
 /**
  * Run the CLI and convert handled spawn errors into structured GeminiResults
- * so callers never need to duplicate the ENOENT/EACCES/EPERM/EFTYPE catch
- * logic.
+ * so callers never need to duplicate the
+ * ENOENT/E2BIG/EACCES/EPERM/EFTYPE catch logic.
  */
 async function safeRunCli(
   argv: string[],
@@ -494,7 +595,7 @@ async function safeRunCli(
     return { kind: "outcome", value: await runCli(argv, options) };
   } catch (err) {
     if (isHandledSpawnError(err)) {
-      // Type guard confirms code is one of ENOENT/EACCES/EPERM, never undefined.
+      // Type guard confirms code is one of the handled values, never undefined.
       return { kind: "spawn_error", value: spawnErrorResult(err.code ?? "ENOENT") };
     }
     throw err;
@@ -539,6 +640,15 @@ export async function invokeGeminiStructured(
       raw: "",
     };
   }
+  const schemaErrors = validateSchemaDefinition(inv.schema);
+  if (schemaErrors.length > 0) {
+    return {
+      text: `Invalid JSON Schema:\n${formatErrors(schemaErrors)}`,
+      exitCode: 42,
+      errorKind: "input_validation",
+      raw: "",
+    };
+  }
 
   const wrappedPrompt = composeStructuredPrompt(inv);
   const argv = buildArgv({
@@ -564,6 +674,15 @@ export function parseAndValidateStructured(
   base: GeminiResult,
   schema: JsonSchema
 ): GeminiStructuredResult {
+  const schemaErrors = validateSchemaDefinition(schema);
+  if (schemaErrors.length > 0) {
+    return {
+      ...base,
+      text: `Invalid JSON Schema:\n${formatErrors(schemaErrors)}`,
+      exitCode: 42,
+      errorKind: "input_validation",
+    };
+  }
   const candidate = extractJson(base.text) ?? base.text.trim();
   let parsed: unknown;
   try {
@@ -580,18 +699,43 @@ export function parseAndValidateStructured(
 
   const errors = validate(parsed, schema);
   if (errors.length > 0) {
+    let received: string;
+    try {
+      received = JSON.stringify(parsed, null, 2);
+    } catch {
+      // Extremely deep JSON can exceed JSON.stringify's call stack. The raw
+      // model text is already output-capped and is safer than throwing out of
+      // the MCP request handler while formatting a validation failure.
+      received = base.text;
+    }
     return {
       ...base,
       text:
-        `Gemini response did not match schema:\n${formatErrors(errors)}\n--- received ---\n${JSON.stringify(parsed, null, 2)}`,
+        `Gemini response did not match schema:\n${formatErrors(errors)}\n--- received ---\n${received}`,
       exitCode: 1,
       errorKind: "error",
     };
   }
 
+  let canonical: string;
+  try {
+    const serialized = JSON.stringify(parsed);
+    if (serialized === undefined) {
+      throw new Error("JSON.stringify returned no value");
+    }
+    canonical = serialized;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      ...base,
+      text: `Gemini structured response could not be serialized safely: ${message}`,
+      exitCode: 1,
+      errorKind: "error",
+    };
+  }
   return {
     ...base,
     value: parsed,
-    text: JSON.stringify(parsed),
+    text: canonical,
   };
 }
