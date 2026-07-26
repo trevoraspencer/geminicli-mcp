@@ -9,7 +9,10 @@ test("classifyExitCode maps documented codes", () => {
   assert.equal(classifyExitCode(1), "error");
   assert.equal(classifyExitCode(41), "auth_required");
   assert.equal(classifyExitCode(42), "input_validation");
+  assert.equal(classifyExitCode(44), "sandbox_error");
+  assert.equal(classifyExitCode(52), "config_error");
   assert.equal(classifyExitCode(53), "turn_limit");
+  assert.equal(classifyExitCode(130), "cancelled");
   assert.equal(classifyExitCode(99), "unknown");
 });
 

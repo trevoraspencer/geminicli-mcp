@@ -7,7 +7,7 @@ newline-delimited JSON-RPC 2.0, so the simplest way to run one is:
 ```bash
 npm run build
 (
-  printf '{"jsonrpc":"2.0","id":-1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl-cli","version":"0.0.0"}}}\n'
+  printf '{"jsonrpc":"2.0","id":-1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"curl-cli","version":"0.0.0"}}}\n'
   printf '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}\n'
   # The example files below are pretty-printed for readability; compact them
   # to a single line because the MCP stdio transport is one JSON-RPC message
@@ -17,9 +17,9 @@ npm run build
 ) | node dist/index.js
 ```
 
-The `protocolVersion` in the `initialize` request should match what your
-installed `@modelcontextprotocol/sdk` advertises; `2025-06-18` is the
-revision shipped with v1.0.x.
+The `protocolVersion` in the `initialize` request should be one supported by
+your installed `@modelcontextprotocol/sdk`; `2025-11-25` is supported by the
+version pinned in this repository's lockfile.
 
 Replace `list_tools.json` with any of the other example files to invoke a
 tool:

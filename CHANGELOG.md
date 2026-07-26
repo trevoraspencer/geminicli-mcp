@@ -23,8 +23,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - README sections: **Prerequisites**, **Exit codes**, **Security caveats**;
   troubleshooting bullet for `Unknown arguments: output-format` (gemini-cli
   < 0.6.1).
-- CI now runs on macOS in addition to Ubuntu, and verifies `npm pack
-  --dry-run` to catch packaging regressions.
 
 ### Changed
 
@@ -35,11 +33,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/`) to prevent argv flag injection
   via `model: "--help"` etc.
 - `resultFromOutcome` now extracts `error.message` from the gemini CLI's
-  failure JSON so users get an actionable error string instead of a raw blob.
+  failure JSON (including the normal `{response: "", error: ...}` shape) so
+  users get an actionable error string instead of a generic exit message.
 - Child kill on signal termination now resolves with `128 + signo` instead of
   masking the cause as exit code 0.
-- `invokedDirectly` entry-point check is more robust (uses
-  `fileURLToPath` + `path.resolve` so symlinks and Windows paths work).
+- Cancellation and output-cap termination signal the full child process group
+  on POSIX, preventing Gemini-spawned tools from being orphaned.
+- Structured schemas are validated before invocation and bounded to 1 MiB,
+  10,000 schema nodes, and 64 levels of nesting.
+- Gemini CLI 0.40.0 is now the minimum supported release, and invocations pass
+  `--skip-trust` so headless YOLO mode is not silently downgraded in a
+  workspace without a saved trust decision.
+- Gemini CLI exit codes 44, 52, and 130 are classified as `sandbox_error`,
+  `config_error`, and `cancelled`.
+- CI actions are immutable-SHA pinned, the compatibility matrix includes Node
+  24, dependency install scripts and persisted checkout credentials are
+  disabled, and Dependabot monitors npm and GitHub Actions dependencies
+  weekly.
+- The entry-point check now uses realpath canonicalization so bin symlinks,
+  relative launches, and Windows paths work without matching unrelated
+  importer filenames.
 - `extractJson` no longer emits a spurious "does not match pattern" error
   alongside an "invalid regex in schema.pattern" error.
 
@@ -60,6 +73,44 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A child that ignores SIGTERM is escalated to SIGKILL after a 2s grace
   period instead of hanging the MCP call forever (output-cap and
   cancellation kills only; no server-side timeout was added).
+- A child that traps SIGTERM and exits 0 can no longer turn cancelled or
+  truncated output into a successful MCP result.
+- Ambiguous repeated regex alternations such as `(a|aa)+`, and repeated groups
+  with an earlier inner quantifier, are now rejected by the ReDoS guard.
+- Schema validation errors are capped at 100 so a large invalid model response
+  cannot exhaust memory by producing an unbounded diagnostic list.
+- Invalid partial values such as `64garbage` no longer get accepted as
+  `GEMINICLI_MCP_MAX_OUTPUT_BYTES=64`.
+- Pretty-printed JSON preceded by a Gemini diagnostic line is recovered
+  correctly.
+- Structured JSON extraction can recover a later balanced value even when a
+  preceding diagnostic contains an unmatched object or array delimiter.
+- Prompts beginning with CLI flags such as `--help` and `--version` are bound
+  with `--prompt=<value>` so Gemini cannot reinterpret them as options.
+- Runtime tool validation now rejects non-object arguments, undeclared fields,
+  and argv-incompatible NUL characters instead of accepting or failing them
+  later.
+- An explicitly supplied empty `context` now produces an empty `<context>`
+  block instead of being treated as if the field were absent.
+- Process-group SIGKILL escalation remains armed when the direct child exits
+  but a stdio-detached descendant survives its initial SIGTERM.
+- Structured responses too deep for `JSON.stringify` now return a controlled
+  error instead of throwing out of the MCP request handler.
+- Nested wrapper groups can no longer hide unsafe regular-expression
+  quantifiers or ambiguous alternations from the ReDoS guard.
+- Regex safety checks now reject unanchored repetition and adjacent
+  overlapping quantified atoms, and pattern evaluation has per-string and
+  aggregate work limits to bound backtracking that evades static heuristics.
+- Oversized prompt/context argv now returns an `input_validation` result when
+  the operating system reports `E2BIG`.
+- Importing this package from an unrelated script also named `dist/index.js`
+  no longer auto-starts the stdio server.
+- Error responses no longer duplicate stderr when stderr was already selected
+  as the primary error text.
+- Production dependencies now override `@hono/node-server` to a patched 2.x
+  release, resolving the transitive `serve-static` path-traversal advisory.
+- Published packages now include the source-map files referenced by compiled
+  JavaScript, and `prepublishOnly` also runs lint.
 - Child exit code 127 now classifies as `error`, matching the README
   exit-code table and the synthesized binary-not-found result.
 - `extractJson` no longer swallows non-`json` fence language tags: a
@@ -68,6 +119,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - README: documented that Windows requires `GEMINI_CLI_BIN` to point at the
   gemini CLI's JavaScript entry (npm `.cmd`/`.ps1` shims cannot be spawned
   without a shell).
+- README and release history no longer claim that 1.0.0 is available from npm
+  or GitHub Releases before those artifacts exist.
 
 ### Removed
 
@@ -77,9 +130,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The prefix is now added by `toMcpResult` only, eliminating the double
   prefix that appeared on ENOENT and structured-error paths.
 
-## [1.0.0] - 2026-05-12
+## 1.0.0 - Unreleased
 
-First public release on npm.
+Initial release candidate. This version has not yet been tagged or published
+to npm.
 
 ### Added
 
@@ -111,5 +165,4 @@ First public release on npm.
   authoritative on cancellation.
 - Single runtime dependency: `@modelcontextprotocol/sdk`.
 
-[Unreleased]: https://github.com/trevoraspencer/geminicli-mcp/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/trevoraspencer/geminicli-mcp/releases/tag/v1.0.0
+[Unreleased]: https://github.com/trevoraspencer/geminicli-mcp/commits/main

@@ -19,27 +19,32 @@ valid we'll work with you on a fix and a coordinated disclosure timeline.
 call its tools). Anything that can reach the server's stdio can do anything
 this server can do. Concretely:
 
-- **`--approval-mode yolo` is always on.** The server hardcodes this flag
-  so it can run non-interactively. Any tool calls or file edits the gemini
-  CLI performs are auto-approved. **Do not expose this MCP server to MCP
-  clients you do not trust.**
-- **Child env inherits the server env.** Anything in the server's
-  environment — including `GEMINI_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`,
-  shell history, dotfile secrets — is visible to the gemini child and to
-  any tool gemini decides to invoke. Treat the server's env as part of the
-  trust boundary.
+- **`--approval-mode yolo` and `--skip-trust` are always on.** The server
+  hardcodes both flags so it can run non-interactively without a saved folder
+  trust decision. Workspace configuration is trusted for the invocation, and
+  any tool calls or file edits the gemini CLI performs are auto-approved.
+  **Do not expose this MCP server to MCP clients or workspaces you do not
+  trust.**
+- **Child env inherits the server env.** Environment variables such as
+  `GEMINI_API_KEY` and `GOOGLE_APPLICATION_CREDENTIALS` are visible to the
+  gemini child and to any tool gemini decides to invoke. The child also has
+  the server user's filesystem permissions, so accessible shell history and
+  dotfile secrets may be read through tools. Treat both as part of the trust
+  boundary.
 - **No quota or rate limiting.** A caller that can reach the server can
   make unlimited gemini API calls at your expense. Gate access at the
   MCP-client layer.
 - **No prompt sanitisation.** Prompts are passed verbatim to the gemini CLI
-  via argv. We rely on argv-as-array (no shell interpolation) and on
-  validating the optional `model` argument; everything else is the gemini
-  CLI's responsibility.
+  via a bound argv element. There is no shell interpolation, but other users
+  allowed to inspect this process may be able to read prompt and context
+  text from the operating system's process list.
 - **No timeout enforcement** in the server. The client is authoritative on
   cancellation; the server honours the MCP request's `AbortSignal` and a
   per-stream output cap (`GEMINICLI_MCP_MAX_OUTPUT_BYTES`, default 32 MiB)
   to prevent a runaway child from OOM-ing the host, but there is no
-  wall-clock timeout.
+  wall-clock timeout. On POSIX, cancellation signals the entire Gemini
+  process group; on Windows it kills only the direct child, so descendants
+  may outlive the request.
 
 If your deployment puts this server behind anything that smells like a
 network boundary (HTTP gateway, SSH tunnel, container exposed to multiple

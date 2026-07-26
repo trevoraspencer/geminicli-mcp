@@ -77,7 +77,7 @@ test("MCP stdio: initialize + tools/list returns exactly 3 tools (VAL-REM-F12-00
       id: 1,
       method: "initialize",
       params: {
-        protocolVersion: "2025-06-18",
+        protocolVersion: "2025-11-25",
         capabilities: {},
         clientInfo: { name: "stdio-test", version: "1.0.0" },
       },
@@ -167,7 +167,7 @@ test(
         id: 1,
         method: "initialize",
         params: {
-          protocolVersion: "2025-06-18",
+          protocolVersion: "2025-11-25",
           capabilities: {},
           clientInfo: { name: "stdio-symlink-test", version: "1.0.0" },
         },

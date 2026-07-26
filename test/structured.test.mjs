@@ -9,7 +9,11 @@ import {
   composeStructuredPrompt,
   invokeGeminiStructured,
 } from "../dist/invoke.js";
-import { validate, extractJson } from "../dist/schema.js";
+import {
+  validate,
+  extractJson,
+  validateSchemaDefinition,
+} from "../dist/schema.js";
 import { makeFakeBin, withEnv } from "./helpers.mjs";
 
 const fakeOkResult = (text) => ({
@@ -98,6 +102,23 @@ test("validate: null array items validate against nullable item schemas (review 
   assert.match(errs[0].message, /expected type string\|null/);
 });
 
+test("validate: caps error accumulation for a large invalid response", () => {
+  const value = Array.from({ length: 10_000 }, () => 7);
+  const errors = validate(value, {
+    type: "array",
+    items: { type: "string" },
+  });
+  assert.equal(errors.length, 100);
+  assert.match(errors[0].path, /\$\[0\]/);
+  assert.match(errors.at(-1).path, /\$\[99\]/);
+});
+
+test("validate: deeply nested const equality does not recurse on the JS stack", () => {
+  let value = "leaf";
+  for (let i = 0; i < 2_000; i++) value = { child: value };
+  assert.deepEqual(validate(value, { const: value }), []);
+});
+
 test("validate: enum", () => {
   const schema = { enum: ["red", "green", "blue"] };
   assert.equal(validate("red", schema).length, 0);
@@ -141,6 +162,72 @@ test("validate: alternation with quantifier (a|b)+ is accepted as safe", () => {
   // Alternation inside quantifier is not a nested quantifier pattern
   const schema = { type: "string", pattern: "^(a|b)+$" };
   assert.equal(validate("abba", schema).length, 0);
+});
+
+test("validate: ambiguous repeated alternation (a|aa)+ is rejected", () => {
+  // This shape is exponential on a long run of "a" followed by a mismatch,
+  // despite containing no visibly nested quantifier.
+  const schema = { type: "string", pattern: "^(a|aa)+$" };
+  const errs = validate("hello", schema);
+  assert.equal(errs.length, 1);
+  assert.match(errs[0].message, /potentially unsafe.*pattern|ReDoS/i);
+});
+
+test("validate: a repeated group with an earlier inner quantifier is rejected", () => {
+  // The previous state machine only remembered whether the final atom in the
+  // group was quantified, so it missed shapes such as (a+bc)+.
+  const schema = { type: "string", pattern: "^(a+bc)+$" };
+  const errs = validate("hello", schema);
+  assert.equal(errs.length, 1);
+  assert.match(errs[0].message, /potentially unsafe.*pattern|ReDoS/i);
+});
+
+test("validate: wrapper groups cannot hide nested quantifier or alternation risks", () => {
+  for (const pattern of [
+    "^((a+))+$",
+    "^(?:(?:a+))+$",
+    "^(((a|aa)))+$",
+  ]) {
+    const errs = validate("hello", { type: "string", pattern });
+    assert.equal(errs.length, 1, pattern);
+    assert.match(errs[0].message, /potentially unsafe.*pattern|ReDoS/i);
+  }
+});
+
+test("validate: unanchored repetition is rejected before polynomial backtracking", () => {
+  // On a long non-match, /a+z/ retries the repeated atom at every input
+  // position and exhibits quadratic runtime.
+  const schema = { type: "string", pattern: "a+z" };
+  const errs = validate("hello", schema);
+  assert.equal(errs.length, 1);
+  assert.match(errs[0].message, /unanchored repetition|ReDoS/i);
+  assert.ok(validateSchemaDefinition(schema).length > 0);
+});
+
+test("validate: adjacent overlapping quantified atoms are rejected", () => {
+  // Anchoring alone does not make /^a+a+z$/ safe: the two repeated atoms can
+  // partition the same run in quadratically many ways.
+  for (const pattern of [
+    "^a+a+z$",
+    "^\\d+\\d+z$",
+    "^[ab]+[bc]+z$",
+    "^(?:ab)+(?:ab)+z$",
+  ]) {
+    const schema = { type: "string", pattern };
+    const errs = validate("hello", schema);
+    assert.equal(errs.length, 1, pattern);
+    assert.match(errs[0].message, /adjacent overlapping|ReDoS/i);
+    assert.ok(validateSchemaDefinition(schema).length > 0);
+  }
+
+  // Obviously disjoint adjacent atoms remain available.
+  assert.equal(
+    validate("abc123", {
+      type: "string",
+      pattern: "^[a-z]+[0-9]+$",
+    }).length,
+    0
+  );
 });
 
 test("validate: deeply nested quantifier (a+)+b is rejected (AUDIT-SEC-002)", () => {
@@ -202,6 +289,66 @@ test("validate: very long pattern is rejected", () => {
   const errs = validate("hello", schema);
   assert.equal(errs.length, 1);
   assert.match(errs[0].message, /potentially unsafe.*pattern|too long/i);
+});
+
+test("validate: bounds regex input length and aggregate evaluation work", () => {
+  const oversized = validate("a".repeat(64 * 1024 + 1), {
+    type: "string",
+    pattern: "^a+$",
+  });
+  assert.equal(oversized.length, 1);
+  assert.match(oversized[0].message, /too long for safe pattern evaluation/i);
+
+  const repeatedChecks = validate("a".repeat(32 * 1024), {
+    allOf: Array.from({ length: 9 }, () => ({
+      type: "string",
+      pattern: "^a+$",
+    })),
+  });
+  assert.equal(repeatedChecks.length, 1);
+  assert.match(repeatedChecks[0].message, /pattern evaluation budget exceeded/i);
+});
+
+test("validateSchemaDefinition rejects malformed nested schema shapes", () => {
+  for (const schema of [
+    { properties: { broken: 1 } },
+    { items: [] },
+    { allOf: [null] },
+    { required: ["name", 7] },
+    { minItems: -1 },
+    { type: "not-a-json-type" },
+  ]) {
+    assert.ok(
+      validateSchemaDefinition(schema).length > 0,
+      `expected malformed schema to be rejected: ${JSON.stringify(schema)}`
+    );
+  }
+});
+
+test("validateSchemaDefinition bounds schema recursion before validate() can overflow", () => {
+  let schema = { type: "string" };
+  for (let i = 0; i < 70; i++) {
+    schema = { allOf: [schema] };
+  }
+  const errors = validateSchemaDefinition(schema);
+  assert.ok(errors.length > 0);
+  assert.match(errors[0].message, /depth|nesting/i);
+});
+
+test("validateSchemaDefinition accepts a representative supported schema", () => {
+  const schema = {
+    type: "object",
+    properties: {
+      name: { type: "string", minLength: 1, pattern: "^[A-Za-z ]+$" },
+      scores: {
+        type: "array",
+        items: { type: "number", minimum: 0, maximum: 100 },
+      },
+    },
+    required: ["name"],
+    additionalProperties: false,
+  };
+  assert.deepEqual(validateSchemaDefinition(schema), []);
 });
 
 // --- Additional schema keyword coverage (AUDIT-TEST-007, VAL-REM-F14-003) ---
@@ -337,6 +484,32 @@ test("extractJson: untagged and uppercase-tagged fences still extract (review fi
   assert.equal(extractJson('```json {"a":1} ```'), '{"a":1}');
 });
 
+test("extractJson skips bracketed diagnostics before valid JSON", () => {
+  assert.equal(
+    extractJson('gemini [cached credentials]\n{"a":1}'),
+    '{"a":1}'
+  );
+});
+
+test("extractJson recovers valid JSON after unmatched diagnostic delimiters", () => {
+  assert.equal(
+    extractJson('warning { unclosed\n{"answer":42}'),
+    '{"answer":42}'
+  );
+  assert.equal(extractJson("warning [ unclosed\n[1,2,3]"), "[1,2,3]");
+  assert.equal(
+    extractJson('warning {"partial":\n{"answer":42}'),
+    '{"answer":42}'
+  );
+});
+
+test("extractJson lets a valid value after an invalid JSON fence win", () => {
+  assert.equal(
+    extractJson('```json\nnot actually json\n```\n{"a":1}'),
+    '{"a":1}'
+  );
+});
+
 test("parseAndValidateStructured: js-fenced JSON parses via the balanced-scan fallback (review finding 7)", () => {
   const schema = {
     type: "object",
@@ -429,6 +602,28 @@ test("parseAndValidateStructured: nested validation error reports the path", () 
   assert.match(out.text, /missing required property 'id'/);
 });
 
+test("parseAndValidateStructured handles JSON deeper than JSON.stringify safely", () => {
+  const depth = 10_000;
+  const text = '{"child":'.repeat(depth) + "0" + "}".repeat(depth);
+  const base = fakeOkResult(text);
+
+  const accepted = parseAndValidateStructured(base, {});
+  // V8's JSON.stringify depth limit varies by Node release. Older supported
+  // runtimes must return a controlled error; runtimes with an iterative
+  // serializer may legitimately accept and canonicalize the same value.
+  if (accepted.exitCode === 0) {
+    assert.equal(accepted.text, text);
+  } else {
+    assert.equal(accepted.exitCode, 1);
+    assert.match(accepted.text, /could not be serialized safely/i);
+  }
+
+  const rejected = parseAndValidateStructured(base, { type: "string" });
+  assert.equal(rejected.exitCode, 1);
+  assert.match(rejected.text, /did not match schema/);
+  assert.match(rejected.text, /--- received ---/);
+});
+
 // --- composeStructuredPrompt ----------------------------------------------
 
 test("composeStructuredPrompt includes schema and an explicit JSON-only instruction", () => {
@@ -460,6 +655,16 @@ test("invokeGeminiStructured rejects a missing schema with input_validation", as
   });
   assert.equal(out.exitCode, 42);
   assert.equal(out.errorKind, "input_validation");
+});
+
+test("invokeGeminiStructured rejects a malformed nested schema before spawning", async () => {
+  const out = await invokeGeminiStructured({
+    prompt: "hi",
+    schema: { properties: { broken: 1 } },
+  });
+  assert.equal(out.exitCode, 42);
+  assert.equal(out.errorKind, "input_validation");
+  assert.match(out.text, /Invalid JSON Schema/);
 });
 
 test("invokeGeminiStructured surfaces ENOENT when the CLI is missing", async () => {

