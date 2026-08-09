@@ -54,13 +54,13 @@
     "@hono/node-server": "^2.0.5"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
-    "@typescript-eslint/eslint-plugin": "^8.59.3",
+    "@types/node": "^26.1.2",
+    "@typescript-eslint/eslint-plugin": "^8.66.0",
     "@typescript-eslint/parser": "^8.59.3",
     "eslint": "^10.3.0",
     "husky": "^9.1.7",
-    "lint-staged": "^15.5.2",
-    "typescript": "^5.6.0"
+    "lint-staged": "^17.3.0",
+    "typescript": "^7.0.2"
   },
   "engines": {
     "node": ">=20"
